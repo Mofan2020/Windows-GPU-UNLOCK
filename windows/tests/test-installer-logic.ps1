@@ -651,6 +651,90 @@ $nsiSource = Get-Content (Join-Path $root 'windows/installer/WindowsGPUUnlock.ns
 Assert-Contains $nsiSource 'SetRegView 64' 'the installer uses the 64 bit registry view'
 Assert-Contains $nsiSource 'Locate-PowerShell' 'the installer looks for the 64 bit PowerShell'
 
+Write-Host 'The note about the boot order'
+
+# The boot order that Windows sets is not the last word. Some motherboards,
+# MSI among them, keep an order of the entries inside UEFI of their own and
+# ignore the one that Windows sets, and the installer cannot change the
+# settings of the firmware. The user has to be told how to set it by hand,
+# and the telling has to happen in more than one place, because the moment
+# it is needed is after a restart, when the log is not at hand.
+
+$notice = @(Get-FirmwareBootOrderNotice `
+        -Identifier '{11111111-2222-3333-4444-555555555555}' `
+        -Description 'Windows GPU UNLOCK' `
+        -Path '\EFI\WindowsGPUUnlock\UNLOCK.EFI')
+$noticeText = $notice -join "`n"
+Assert-True ($notice.Count -gt 8) 'the note has more than a line or two'
+Assert-Contains $noticeText 'Windows Boot Manager' 'the note says what the entry has to be put in front of'
+Assert-Contains $noticeText 'UEFI' 'the note says where the order is'
+Assert-Contains $noticeText 'MSI' 'the note names the boards that are known for this'
+Assert-Contains $noticeText '{11111111-2222-3333-4444-555555555555}' 'the note carries the identifier of the entry'
+Assert-Contains $noticeText '\EFI\WindowsGPUUnlock\UNLOCK.EFI' 'the note carries the path of the file'
+Assert-Contains $noticeText 'Windows GPU UNLOCK' 'the note carries the name of the entry'
+
+# The installer writes the note next to its own files, so that it is there
+# when the machine is in Windows.
+Assert-Contains $installSource 'BIOS-ORDER.txt' 'the installer writes the note'
+Assert-Contains $installSource 'Write-FirmwareBootOrderNotice' 'the installer uses the shared text'
+
+# The note is written for real here, and read back, because a note that
+# cannot be written is no note at all.
+$scratch = Join-Path ([System.IO.Path]::GetTempPath()) ('wgpu-note-' + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $scratch -Force | Out-Null
+try {
+    $noteFile = Join-Path $scratch 'BIOS-ORDER.txt'
+    [void](Write-FirmwareBootOrderNotice -Path $noteFile `
+            -Identifier '{22222222-3333-4444-5555-666666666666}' `
+            -Description 'Windows GPU UNLOCK' `
+            -EfiPath '\EFI\WindowsGPUUnlock\UNLOCK.EFI')
+    Assert-True (Test-Path -LiteralPath $noteFile) 'the note is written'
+    $written = Get-Content -LiteralPath $noteFile -Raw
+    Assert-Contains $written 'Windows Boot Manager' 'the written note says what the entry goes in front of'
+    Assert-Contains $written '{22222222-3333-4444-5555-666666666666}' 'the written note carries the identifier'
+    Assert-Contains $written '\EFI\WindowsGPUUnlock\UNLOCK.EFI' 'the written note carries the path'
+    Assert-Contains $written 'UEFI' 'the written note says where the order is'
+} finally {
+    if (Test-Path -LiteralPath $scratch) {
+        Remove-Item -LiteralPath $scratch -Recurse -Force
+    }
+}
+
+# The name of the boot entry is what the user has to look for in the
+# firmware setup. The script and the installer program have to use the same
+# one, or the note names an entry that is not there.
+#
+# The pattern is in a single quoted string, so that the dollar sign of the
+# variable name stays a dollar sign. In a double quoted one it would have to
+# be escaped twice, and a dollar sign in a pattern is the end of a line.
+$bootEntryDefault = ''
+foreach ($line in ($installSource -split "`r?`n")) {
+    if ($line -match '\[string\]\$BootEntryName = ''([^'']+)''') {
+        $bootEntryDefault = $Matches[1]
+    }
+}
+Assert-True ($bootEntryDefault -ne '') 'the boot entry name has a default'
+Assert-Contains $nsiSource ("!define BOOT_ENTRY_NAME `"$bootEntryDefault`"") `
+    'the installer program uses the same name for the boot entry'
+
+# The page that is shown at the end of the installation points at the note.
+Assert-Contains $nsiSource 'MUI_FINISHPAGE_TEXT' 'the installer says something on its last page'
+Assert-Contains $nsiSource 'BIOS-ORDER.txt' 'the last page points at the note'
+
+# The box that restarts the machine into the firmware setup is not checked
+# to begin with. A box that is checked would restart the machine whenever
+# the last page is left.
+Assert-Contains $nsiSource 'MUI_FINISHPAGE_RUN_NOTCHECKED' 'the box that restarts the machine is not checked to begin with'
+
+# A message box without an answer given in advance waits for a key press
+# that nobody is there to press. The installer is run silently by the
+# automatic test, and a box like that hangs it.
+$boxes = [regex]::Matches($nsiSource, '(?m)^\s*MessageBox\b[^\r\n]*')
+Assert-True ($boxes.Count -ge 4) 'the installer has several message boxes'
+foreach ($box in $boxes) {
+    Assert-Contains $box.Value '/SD' 'every message box has an answer given in advance'
+}
+
 Write-Host 'The log that the installer writes'
 
 # The installer writes the first lines of the log itself, and the script

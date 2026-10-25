@@ -209,6 +209,18 @@ function Install-GpuUnlock {
     Write-Ok ("It boots from {0}" -f $entry.Device)
     Write-Ok 'It is first in the firmware boot order, so it runs before Windows starts'
 
+    # The note about the boot order. It is written next to the other files of
+    # the installation, because the moment it is needed is after a restart,
+    # and the user is then in Windows and does not have the log at hand.
+    $noticeFile = Join-Path $PSScriptRoot 'BIOS-ORDER.txt'
+    try {
+        [void](Write-FirmwareBootOrderNotice -Path $noticeFile -Identifier $newId `
+                -Description $Description -EfiPath $expectedPath)
+        Write-Ok ("The note about the boot order is in {0}" -f $noticeFile)
+    } catch {
+        Write-Note "The note about the boot order could not be written: $($_.Exception.Message)"
+    }
+
     $state = [ordered]@{
         Version           = 1
         Action            = 'installed'
@@ -235,6 +247,14 @@ function Install-GpuUnlock {
     Write-Host ''
     Write-Host '    The report of every run is written to:' -ForegroundColor Green
     Write-Host ("      {0}\EFI\WindowsGPUUnlock\RUNnn\REPORT.TXT" -f $espPath) -ForegroundColor Green
+    Write-Host ''
+    Write-Host '    One thing to look at after the first restart:' -ForegroundColor Yellow
+    Write-Host '    Some motherboards, MSI among them, keep an order of the entries inside' -ForegroundColor Yellow
+    Write-Host '    UEFI of their own and ignore the one that Windows sets. If the machine' -ForegroundColor Yellow
+    Write-Host '    boots straight into Windows, without the screen going black and without' -ForegroundColor Yellow
+    Write-Host '    the question about pressing C, then that is what happened, and the order' -ForegroundColor Yellow
+    Write-Host '    has to be set in the firmware setup by hand. The note "BIOS-ORDER.txt"' -ForegroundColor Yellow
+    Write-Host '    next to the files of this installation says how.' -ForegroundColor Yellow
     Write-Host ''
     Write-Host '    To remove it, run this installer again and choose Uninstall.' -ForegroundColor Green
 }

@@ -652,3 +652,94 @@ function Unregister-BcdBootEntry {
 
     return @(Get-BcdDisplayOrder (Invoke-Bcd @('/enum', '{fwbootmgr}', '/v') -LogOutput))
 }
+
+function Get-FirmwareBootOrderNotice {
+    <#
+    .SYNOPSIS
+        The text that tells the user how to set the boot order by hand.
+
+    .DESCRIPTION
+        The installer puts the new entry first in the firmware boot order
+        and reads the order back, to make sure that it is really there.
+        That is all that Windows can do about it. Some motherboards keep
+        an order of the entries inside UEFI of their own and ignore the
+        one that is set here, and MSI boards are known for that. The
+        installer cannot change the settings of the firmware, so it tells
+        the user what to do and where to look.
+
+        The same text is shown at the end of the installation and written
+        into a file, so that the two cannot drift apart.
+
+    .PARAMETER Identifier
+        The identifier of the boot entry.
+
+    .PARAMETER Description
+        The name the entry carries in the boot menu.
+
+    .PARAMETER Path
+        The path of the application on the EFI system partition.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Identifier,
+        [Parameter(Mandatory)][string]$Description,
+        [Parameter(Mandatory)][string]$Path
+    )
+
+    return @(
+        'Some motherboards keep an order of the entries inside UEFI of their own and'
+        'ignore the one that Windows sets. MSI boards are known for this.'
+        ''
+        'If the machine boots straight into Windows, without the screen going black'
+        'for a few seconds and without the question about pressing C, then the'
+        'firmware ignored the order, and the unlock did not run.'
+        ''
+        'To set the order by hand:'
+        '  1. Restart the machine and enter the firmware setup. On an MSI board that'
+        '     is the DEL key while it starts. The boot menu of the firmware is F11.'
+        '  2. Open the boot order. It is under "Boot", or under "Advanced", and it is'
+        '     called "Boot Option #1" or "UEFI boot order", depending on the board.'
+        ('  3. In the list of the entries inside UEFI, move "{0}" in front of' -f $Description)
+        '     "Windows Boot Manager".'
+        '  4. Save the settings and leave the firmware. The machine starts the unlock'
+        '     application, and then Windows.'
+        ''
+        'The entry to look for:'
+        ('  name        {0}' -f $Description)
+        ('  identifier  {0}' -f $Identifier)
+        ('  file        {0}' -f $Path)
+    )
+}
+
+function Write-FirmwareBootOrderNotice {
+    <#
+    .SYNOPSIS
+        Writes the note about the boot order to a file.
+
+    .DESCRIPTION
+        The note is written next to the other files of the installation,
+        because the moment it is needed is after a restart, when the user is
+        in Windows and does not have the log at hand.
+
+    .PARAMETER Path
+        The file the note is written to.
+
+    .PARAMETER Identifier
+        The identifier of the boot entry.
+
+    .PARAMETER Description
+        The name the entry carries in the boot menu.
+
+    .PARAMETER EfiPath
+        The path of the application on the EFI system partition.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Identifier,
+        [Parameter(Mandatory)][string]$Description,
+        [Parameter(Mandatory)][string]$EfiPath
+    )
+
+    $lines = @(Get-FirmwareBootOrderNotice -Identifier $Identifier -Description $Description -Path $EfiPath)
+    $lines | Set-Content -LiteralPath $Path -Encoding UTF8
+    return $lines
+}

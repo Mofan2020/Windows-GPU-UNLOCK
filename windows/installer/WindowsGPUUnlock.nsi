@@ -38,6 +38,11 @@
 !define UNINSTKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\WindowsGPUUnlock"
 !define LOGFILE "install.log"
 
+; The name the boot entry carries. The PowerShell installer uses the same
+; name, and the test checks that the two are the same, because the name is
+; what the user has to look for in the firmware setup.
+!define BOOT_ENTRY_NAME "Windows GPU UNLOCK"
+
 Name "${PRODUCT} ${VERSION}"
 OutFile "WindowsGPUUnlock-${VERSION}-setup.exe"
 Unicode true
@@ -66,6 +71,26 @@ VIAddVersionKey "ProductVersion" "${PRODUCT_VERSION}"
 ; is done. The long version is in the log and in the documentation.
 !define MUI_WELCOMEPAGE_TITLE "${PRODUCT} ${VERSION}"
 !define MUI_WELCOMEPAGE_TEXT "This installer unlocks the FP16 and BF16 tensor instruction rate on NVIDIA GeForce RTX 30-series cards (GA102, GA103, GA104, GA106 - the RTX 3090, 3080, 3070 and 3060 families).$\r$\n$\r$\nBEFORE YOU CONTINUE, READ THIS:$\r$\n$\r$\n1. Secure Boot must be OFF in your BIOS. The application is not signed, so a firmware that enforces Secure Boot will refuse to load it.$\r$\n$\r$\n2. Windows Fast Startup must be OFF, so that a shutdown really powers the card down. Run: powercfg /h off$\r$\n$\r$\n3. If BitLocker protects your Windows volume, suspend it first. Run: manage-bde -protectors -disable C:$\r$\n$\r$\n4. If your computer has only one graphics card, the screen goes black for a few seconds while the card resets, and it comes back when Windows starts. The application tells you so and asks you to press C to confirm it before it starts anything. On a computer with a second graphics card or an integrated GPU, the screen usually stays on.$\r$\n$\r$\n5. The installer is not signed, so Windows may warn about an unknown publisher. Antivirus software may also block the application. If it says 'Error opening file for writing', add this folder to the trust list of your antivirus software, or install into another folder.$\r$\n$\r$\n6. About 100 MB is downloaded from NVIDIA and the CachyOS archive. The NVIDIA firmware files are not part of this package, because NVIDIA's licence does not allow it; they are generated on this machine and checked against their SHA-256.$\r$\n$\r$\nThis is experimental. It writes to the card's firmware and to its registers. Keep a bootable USB handy, and do not use it on a machine you depend on for work."
+
+; The finish page. The boot order is the one thing the installer cannot do
+; on its own: the firmware boot order is set from Windows and read back, and
+; on some motherboards, MSI among them, the firmware keeps an order of the
+; entries inside UEFI of its own and ignores the one that was set. The user
+; has to set it by hand there.
+;
+; The text of the page is short, because the box of the page holds three
+; lines when there is a checkbox in it. The full text is in the message box
+; at the end of the installation and in the file BIOS-ORDER.txt.
+!define MUI_FINISHPAGE_TITLE "${PRODUCT} ${VERSION} is installed"
+!define MUI_FINISHPAGE_TEXT "The unlock runs before Windows starts.$\r$\nOn some motherboards the boot order has to be set$\r$\nby hand in the firmware setup. See BIOS-ORDER.txt."
+
+; The box that restarts the machine into the firmware setup. It is not
+; checked to begin with, so that nothing happens unless it is asked for.
+; The setup itself is opened by the system; the tool changes nothing in it.
+!define MUI_FINISHPAGE_RUN "$WINDIR\System32\shutdown.exe"
+!define MUI_FINISHPAGE_RUN_PARAMETERS "/r /fw /t 0"
+!define MUI_FINISHPAGE_RUN_TEXT "Restart into the firmware setup now"
+!define MUI_FINISHPAGE_RUN_NOTCHECKED
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
@@ -259,7 +284,14 @@ Section "Install"
     Abort
   ${EndIf}
 
-  MessageBox MB_OK "Done. Reboot to try it.$\r$\n$\r$\nThe log has been opened for you, and it is here: $INSTDIR\${LOGFILE}" /SD IDOK
+  ; The message at the end of the installation.
+  ;
+  ; The boot order that Windows sets is not the last word. Some motherboards,
+  ; MSI among them, keep an order of the entries inside UEFI of their own and
+  ; ignore the one that was set here, and the installer cannot change the
+  ; settings of the firmware. The message says what to look at after the
+  ; first restart, and where the full text is.
+  MessageBox MB_OK "Done. Reboot to try it.$\r$\n$\r$\nOne thing to look at after the first restart: some motherboards, MSI among them, keep an order of the entries inside UEFI of their own and ignore the boot order that Windows sets. If the machine boots straight into Windows, with no black screen and no question about pressing C, then that is what happened, and the order has to be set in the firmware setup by hand. The file BIOS-ORDER.txt next to these files says how, and it names the entry and its file.$\r$\n$\r$\nThe log has been opened for you, and it is here: $INSTDIR\${LOGFILE}" /SD IDOK
 SectionEnd
 
 Section "Uninstall"
@@ -289,6 +321,7 @@ Section "Uninstall"
   Delete "$INSTDIR\Detect-Hardware.ps1"
   Delete "$INSTDIR\Test-Preconditions.ps1"
   Delete "$INSTDIR\Get-FirmwareAssets.ps1"
+  Delete "$INSTDIR\BIOS-ORDER.txt"
   Delete "$INSTDIR\Uninstall.exe"
   Delete "$INSTDIR\${LOGFILE}"
   RMDir "$INSTDIR\payload"

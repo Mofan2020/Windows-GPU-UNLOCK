@@ -105,6 +105,35 @@ A report of every run is written to the EFI system partition:
 <ESP>\EFI\WindowsGPUUnlock\RUNnn\REPORT.TXT
 ```
 
+### When the firmware ignores the boot order
+
+The installer puts the new entry first in the firmware boot order and reads the
+order back, so that the setting itself is verified. That is all that Windows
+can do about it. Some motherboards — MSI boards are known for this — keep an
+order of the entries inside UEFI of their own and ignore the one that Windows
+sets, and the entry is then never started.
+
+The symptom is clear: the machine boots straight into Windows, with no black
+screen and no question about pressing `C`. Nothing is written to the EFI
+partition, and there is no `RUNnn` directory with a report in it.
+
+The order has to be set in the firmware setup by hand:
+
+1. Restart the machine and enter the firmware setup. On an MSI board that is
+   the `DEL` key while it starts; the boot menu of the firmware is `F11`.
+2. Open the boot order. It is under `Boot`, or under `Advanced`, and it is
+   called `Boot Option #1` or `UEFI boot order`, depending on the board.
+3. In the list of the entries inside UEFI, move `Windows GPU UNLOCK` in front of
+   `Windows Boot Manager`.
+4. Save the settings and leave the firmware. The machine starts the unlock
+   application, and then Windows.
+
+The installer says the same at the end of the installation and writes it to
+`BIOS-ORDER.txt` next to its own files, together with the identifier of the
+entry and the path of the file on the partition. The last page of the
+installer also carries a box that restarts the machine into the firmware
+setup; it is not checked to begin with.
+
 ### Removing it
 
 Run the same installer again and choose **Uninstall**. It removes the boot
