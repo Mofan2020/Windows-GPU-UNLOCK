@@ -12,6 +12,11 @@ on:
       - 'windows/**'
       - 'deps/edk2/**'
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'The version of the package, for example 1.0.0'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -243,6 +248,8 @@ jobs:
 
       - name: Package the installer
         shell: pwsh
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
         run: |
           # makensis ships with the NSIS package on the runner image.
           $makensis = (Get-Command makensis.exe -ErrorAction SilentlyContinue).Source
@@ -252,13 +259,18 @@ jobs:
           }
           if (-not $makensis) { throw 'makensis.exe was not found' }
 
-          # A tag of the form v1.2.3 names the package; anything else is a
-          # development build. The product version in the resources has to be
-          # a plain number, so it is built apart from the name.
+          # A tag of the form v1.2.3 names the package; a run that asks for a
+          # version names it as well; anything else is a development build.
+          # The product version in the resources has to be a plain number, so
+          # it is built apart from the name.
           $version = '1.0.0-dev'
           $productVersion = '1.0.0.0'
           if ($env:GITHUB_REF -like 'refs/tags/v*') {
             $version = $env:GITHUB_REF_NAME -replace '^v', ''
+            $productVersion = "$version.0"
+          }
+          if ($env:REQUESTED_VERSION) {
+            $version = $env:REQUESTED_VERSION
             $productVersion = "$version.0"
           }
           Write-Host "Building the installer for version $version"
