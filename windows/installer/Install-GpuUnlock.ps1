@@ -47,81 +47,6 @@ $script:StateFile = Join-Path $script:StateDirectory 'install-state.json'
 $script:EfiRelativeDirectory = '\EFI\WindowsGPUUnlock'
 $script:EfiApplicationName = 'UNLOCK.EFI'
 
-function Get-BcdEditPath {
-    <#
-    .SYNOPSIS
-        The path of bcdedit.exe.
-    .DESCRIPTION
-        bcdedit.exe is a 64 bit program and there is no 32 bit copy of it. A
-        32 bit process cannot see it in the system directory, because the
-        system directory of such a process points at the 32 bit one, and the
-        command is then not found at all. The Sysnative alias reaches the
-        64 bit one from a 32 bit process.
-    #>
-    $candidates = @(
-        (Join-Path $env:SystemRoot 'System32\bcdedit.exe'),
-        (Join-Path $env:SystemRoot 'Sysnative\bcdedit.exe')
-    )
-    foreach ($candidate in $candidates) {
-        if (Test-Path -LiteralPath $candidate) {
-            return $candidate
-        }
-    }
-    $found = Get-Command bcdedit -ErrorAction SilentlyContinue
-    if ($null -ne $found) {
-        return $found.Source
-    }
-    throw ("bcdedit.exe was not found. It is a 64 bit program, and a 32 bit process cannot run it." +
-        " Looked in: $($candidates -join ', ')")
-}
-
-function Invoke-Bcd {
-    <#
-    .SYNOPSIS
-        Runs bcdedit and returns its output.
-    #>
-    param([Parameter(Mandatory)][string[]]$Arguments)
-
-    $bcdedit = Get-BcdEditPath
-
-    # bcdedit writes to its error stream when it does not like something.
-    # That is read here instead of being turned into a terminating error, so
-    # that the reason it gives ends up in the log.
-    $previous = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    try {
-        $output = & $bcdedit @Arguments 2>&1
-        $code = $LASTEXITCODE
-    } finally {
-        $ErrorActionPreference = $previous
-    }
-
-    if ($code -ne 0) {
-        throw "bcdedit $($Arguments -join ' ') failed (exit $code):`n$($output -join "`r`n")"
-    }
-    return ($output -join "`r`n")
-}
-
-function Get-BcdEntryId {
-    <#
-    .SYNOPSIS
-        Finds the identifier of an existing boot entry by its description.
-    #>
-    param([Parameter(Mandatory)][string]$Description)
-
-    $all = Invoke-Bcd @('/enum', 'all')
-    $blocks = $all -split '(?m)^\s*$'
-    foreach ($block in $blocks) {
-        if ($block -match '(?m)^\s*description\s+(.+?)\s*$' -and
-            $Matches[1].Trim() -eq $Description) {
-            if ($block -match '(?m)^\s*identifier\s+(\{[0-9a-fA-F-]{36}\})\s*$') {
-                return $Matches[1]
-            }
-        }
-    }
-    return $null
-}
-
 function Install-GpuUnlock {
     param(
         [Parameter(Mandatory)][string]$Payload,
@@ -259,35 +184,67 @@ function Install-GpuUnlock {
     & (Get-BcdEditPath) /export (Join-Path $backupRoot 'BCD-export') | Out-Null
     Write-Ok ("Boot configuration exported to {0}" -f $backupRoot)
 
-    $existing = Get-BcdEntryId -Description $Description
+    $existing = Get-BcdEntryId -Text (Invoke-Bcd @('/enum', 'all')) -Description $Description
     if ($existing) {
         throw "A boot entry named '$Description' already exists. Remove it first, or choose another name."
     }
 
-    $managerText = Invoke-Bcd @('/enum', '{bootmgr}')
-    $managerId = $null
-    if ($managerText -match '(?m)^\s*identifier\s+(\{[0-9a-fA-F-]{36}\})\s*$') {
-        $managerId = $Matches[1]
-    }
+    # The Windows Boot Manager. The dump is taken with the verbose switch,
+    # because bcdedit prints the name of a well known object, such as
+    # {bootmgr}, instead of its identifier otherwise. The names of the
+    # properties in the dump are in the language of the machine, so nothing
+    # is looked for by a name: the identifier is the first value in the dump
+    # that has the shape of a GUID.
+    $managerText = Invoke-Bcd @('/enum', '{bootmgr}', '/v') -LogOutput
+    $managerId = Get-BcdIdentifier -Text $managerText
     if (-not $managerId) {
         throw 'The identifier of the Windows Boot Manager could not be read'
     }
 
+    # The device the Windows Boot Manager boots from. That is the partition
+    # the boot manager itself lives on, which is the EFI system partition.
+    $managerDevices = @(Get-BcdPropertyValue -Text $managerText -ValuePattern '^partition=')
+    $managerDevice = ''
+    if ($managerDevices.Count -gt 0) {
+        $managerDevice = $managerDevices[0]
+    }
+
     # The boot order before the change, so that it can be restored.
-    $beforeOrder = @(Get-BcdDisplayOrder (Invoke-Bcd @('/enum', '{fwbootmgr}')))
+    $beforeOrder = @(Get-BcdDisplayOrder (Invoke-Bcd @('/enum', '{fwbootmgr}', '/v') -LogOutput))
     if ($beforeOrder.Count -eq 0) {
         $beforeOrder = @($managerId)
     }
 
     [void](Invoke-Bcd @('/copy', '{bootmgr}', '/d', $Description))
-    $newId = Get-BcdEntryId -Description $Description
+    $newId = Get-BcdEntryId -Text (Invoke-Bcd @('/enum', 'all')) -Description $Description
     if (-not $newId) {
         throw 'The new boot entry could not be found after it was created'
     }
 
+    # The entry is a copy of the Windows Boot Manager, so it starts out with
+    # the device of that boot manager, which is the partition the application
+    # was staged on. The device is checked and, if it names another partition
+    # or none at all, it is set to the one of the Windows Boot Manager. The
+    # drive letter is not used for it, because a letter is not known to the
+    # firmware at boot time.
+    $expectedPath = $script:EfiRelativeDirectory + '\' + $script:EfiApplicationName
+    $entryText = Invoke-Bcd @('/enum', $newId, '/v') -LogOutput
+    $entryDevices = @(Get-BcdPropertyValue -Text $entryText -ValuePattern '^partition=')
+    if ($entryDevices.Count -eq 0 -or ($managerDevice -and $entryDevices[0] -ne $managerDevice)) {
+        if (-not $managerDevice) {
+            $managerDevice = 'partition=' + $espLetter + ':'
+        }
+        [void](Invoke-Bcd @('/set', $newId, 'device', $managerDevice))
+        $entryText = Invoke-Bcd @('/enum', $newId, '/v') -LogOutput
+        $entryDevices = @(Get-BcdPropertyValue -Text $entryText -ValuePattern '^partition=')
+        if ($entryDevices.Count -eq 0) {
+            throw "The boot entry does not name the partition it boots from. It says:`r`n$entryText"
+        }
+    }
+    Write-Ok ("The boot entry boots from {0}" -f $entryDevices[0])
+
     # Point the entry at the staged application on the EFI partition.
-    [void](Invoke-Bcd @('/set', $newId, 'device', ('partition=' + $espLetter + ':')))
-    [void](Invoke-Bcd @('/set', $newId, 'path', ($script:EfiRelativeDirectory + '\' + $script:EfiApplicationName)))
+    [void](Invoke-Bcd @('/set', $newId, 'path', $expectedPath))
 
     # Put the entry first in the firmware boot order, so that the unlock runs
     # before the NVIDIA driver binds the card. The Windows Boot Manager stays
@@ -297,13 +254,13 @@ function Install-GpuUnlock {
     [void](Invoke-Bcd (@('/set', '{fwbootmgr}', 'displayorder') + $newOrder))
 
     # Read the result back.
-    $afterOrder = @(Get-BcdDisplayOrder (Invoke-Bcd @('/enum', '{fwbootmgr}')))
+    $afterOrder = @(Get-BcdDisplayOrder (Invoke-Bcd @('/enum', '{fwbootmgr}', '/v') -LogOutput))
     if (($afterOrder -join ',') -ne ($newOrder -join ',')) {
         throw "The firmware boot order does not match the plan. Expected $($newOrder -join ','), found $($afterOrder -join ',')"
     }
-    $afterText = Invoke-Bcd @('/enum', $newId)
-    if ($afterText -notmatch ('(?mi)^path\s+' + [regex]::Escape(($script:EfiRelativeDirectory + '\' + $script:EfiApplicationName)) + '\s*$')) {
-        throw 'The boot entry does not point at the staged application'
+    $afterText = Invoke-Bcd @('/enum', $newId, '/v') -LogOutput
+    if (-not (Test-BcdPropertyValue -Text $afterText -Value $expectedPath)) {
+        throw "The boot entry does not point at the staged application. It says:`r`n$afterText"
     }
 
     Write-Ok "Boot entry '$Description' registered as $newId"
@@ -359,10 +316,10 @@ function Uninstall-GpuUnlock {
 
     Write-Step 'Removing the boot entry'
 
-    $existing = Get-BcdEntryId -Description $Description
+    $existing = Get-BcdEntryId -Text (Invoke-Bcd @('/enum', 'all')) -Description $Description
     if ($existing) {
         # Put the boot order back the way it was before the installation.
-        $current = @(Get-BcdDisplayOrder (Invoke-Bcd @('/enum', '{fwbootmgr}')))
+        $current = @(Get-BcdDisplayOrder (Invoke-Bcd @('/enum', '{fwbootmgr}', '/v') -LogOutput))
         $restored = @($current | Where-Object { $_ -ne $existing })
         $original = @()
         if ($state.bootOrderBefore) {
@@ -375,7 +332,7 @@ function Uninstall-GpuUnlock {
         }
         Write-Ok "Boot entry '$Description' removed"
 
-        $after = @(Get-BcdDisplayOrder (Invoke-Bcd @('/enum', '{fwbootmgr}')))
+        $after = @(Get-BcdDisplayOrder (Invoke-Bcd @('/enum', '{fwbootmgr}', '/v') -LogOutput))
         if ($after -contains $existing) {
             throw 'The boot entry is still in the firmware boot order'
         }

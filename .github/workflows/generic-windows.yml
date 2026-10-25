@@ -247,8 +247,85 @@ jobs:
           & $bcdedit /enum '{fwbootmgr}'
           Write-Host '--- bcdedit /enum {fwbootmgr} /v ---'
           & $bcdedit /enum '{fwbootmgr}' /v
-          Write-Host '--- bcdedit /enum all (the first sixty lines) ---'
-          & $bcdedit /enum all | Select-Object -First 60
+      # The parser of the installer is run against the output of a real
+      # bcdedit, and the whole registration cycle is carried out on the
+      # runner, so that a difference between the parser and the real output
+      # is found here and not on the machine of a user. Everything that the
+      # cycle changes is put back afterwards.
+      - name: Register a boot entry the way the installer does
+        shell: pwsh
+        run: |
+          . ./windows/installer/Installer-Common.ps1
+
+          $description = 'Windows GPU UNLOCK (CI)'
+          $newId = ''
+          $beforeOrder = @()
+
+          try {
+            # The identifier of the Windows Boot Manager.
+            $managerText = Invoke-Bcd @('/enum', '{bootmgr}', '/v') -LogOutput
+            $managerId = Get-BcdIdentifier -Text $managerText
+            if (-not $managerId) { throw 'the identifier of the Windows Boot Manager could not be read' }
+            Write-Host "OK   the Windows Boot Manager is $managerId"
+
+            $managerDevices = @(Get-BcdPropertyValue -Text $managerText -ValuePattern '^partition=')
+            if ($managerDevices.Count -eq 0) { throw 'the Windows Boot Manager does not name a device' }
+            Write-Host "OK   the Windows Boot Manager boots from $($managerDevices[0])"
+
+            # The firmware boot order before the change.
+            $beforeOrder = @(Get-BcdDisplayOrder (Invoke-Bcd @('/enum', '{fwbootmgr}', '/v') -LogOutput))
+            if ($beforeOrder.Count -eq 0) { throw 'the firmware boot order could not be read' }
+            Write-Host "OK   the firmware boot order is $($beforeOrder -join ', ')"
+
+            # The entry that the installer creates.
+            $existing = Get-BcdEntryId -Text (Invoke-Bcd @('/enum', 'all')) -Description $description
+            if ($existing) { throw 'a boot entry with that name is already there' }
+
+            [void](Invoke-Bcd @('/copy', '{bootmgr}', '/d', $description))
+            $newId = Get-BcdEntryId -Text (Invoke-Bcd @('/enum', 'all')) -Description $description
+            if (-not $newId) { throw 'the new boot entry could not be found' }
+            Write-Host "OK   the new boot entry is $newId"
+
+            # What the copy brought with it.
+            $entryText = Invoke-Bcd @('/enum', $newId, '/v') -LogOutput
+            $entryDevices = @(Get-BcdPropertyValue -Text $entryText -ValuePattern '^partition=')
+            Write-Host "OK   the copy boots from $($entryDevices -join ', ')"
+
+            if ($entryDevices.Count -eq 0 -or $entryDevices[0] -ne $managerDevices[0]) {
+              [void](Invoke-Bcd @('/set', $newId, 'device', $managerDevices[0]))
+              $entryText = Invoke-Bcd @('/enum', $newId, '/v') -LogOutput
+              $entryDevices = @(Get-BcdPropertyValue -Text $entryText -ValuePattern '^partition=')
+              if ($entryDevices.Count -eq 0) { throw 'the boot entry does not name a device' }
+              Write-Host "OK   the device was set to $($entryDevices[0])"
+            }
+
+            [void](Invoke-Bcd @('/set', $newId, 'path', '\EFI\WindowsGPUUnlock\UNLOCK.EFI'))
+            $entryText = Invoke-Bcd @('/enum', $newId, '/v') -LogOutput
+            if (-not (Test-BcdPropertyValue -Text $entryText -Value '\EFI\WindowsGPUUnlock\UNLOCK.EFI')) {
+              throw 'the boot entry does not point at the staged application'
+            }
+            Write-Host 'OK   the entry points at the staged application'
+
+            # The firmware boot order.
+            $newOrder = @($newId) + @($beforeOrder | Where-Object { $_ -ne $newId })
+            [void](Invoke-Bcd (@('/set', '{fwbootmgr}', 'displayorder') + $newOrder))
+            $afterOrder = @(Get-BcdDisplayOrder (Invoke-Bcd @('/enum', '{fwbootmgr}', '/v') -LogOutput))
+            if (($afterOrder -join ',') -ne ($newOrder -join ',')) {
+              throw "the firmware boot order does not match the plan: expected $($newOrder -join ','), got $($afterOrder -join ',')"
+            }
+            Write-Host 'OK   the entry is first in the firmware boot order'
+          } finally {
+            # The runner has to boot the way it did before.
+            $bcdedit = Join-Path $env:SystemRoot 'System32\bcdedit.exe'
+            if ($newId) {
+              & $bcdedit /delete $newId
+            }
+            if ($beforeOrder.Count -gt 0) {
+              & $bcdedit /set '{fwbootmgr}' displayorder $beforeOrder
+            }
+            Write-Host '--- the boot configuration was put back ---'
+            & $bcdedit /enum '{fwbootmgr}' /v
+          }
 
   installer:
     name: installer package

@@ -231,19 +231,238 @@ function Expand-InstallerPayload {
     }
 }
 
-function Get-BcdDisplayOrder {    <#
+# ---------------------------------------------------------------------------
+# The boot configuration.
+#
+# bcdedit prints the boot configuration in the language of the machine: the
+# name of a property is translated, so "identifier" is "Identificador" on a
+# Spanish Windows and something else on a Chinese one. The value of a
+# property is not translated, and an identifier always has the same shape.
+#
+# Everything below therefore looks for values and never for names. A dump
+# also has to be taken with the verbose switch, because bcdedit prints the
+# name of a well known object, such as {bootmgr}, instead of its identifier
+# when it is not.
+# ---------------------------------------------------------------------------
+
+$script:BcdIdentifierPattern = '\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}'
+
+# An object in a dump starts with its name, then a line of dashes, then its
+# properties. The objects are separated by an empty line.
+$script:BcdObjectPattern = '(?ms)^(?<name>[^\r\n]+)\r?\n-{3,}[ \t]*\r?\n(?<body>.*?)(?=\r?\n[ \t]*\r?\n|\z)'
+
+function Get-BcdEditPath {
+    <#
     .SYNOPSIS
-        Reads the firmware boot order from a boot configuration dump.
+        The path of bcdedit.exe.
     .DESCRIPTION
-        The order lives in the displayorder element of the firmware boot
-        manager. It is the order in which the boot manager tries the entries,
-        so the unlock application is put in front of the Windows Boot Manager.
+        bcdedit.exe is a 64 bit program and there is no 32 bit copy of it. A
+        32 bit process cannot see it in the system directory, because the
+        system directory of such a process points at the 32 bit one, and the
+        command is then not found at all. The Sysnative alias reaches the
+        64 bit one from a 32 bit process.
+    #>
+    $candidates = @(
+        (Join-Path $env:SystemRoot 'System32\bcdedit.exe'),
+        (Join-Path $env:SystemRoot 'Sysnative\bcdedit.exe')
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate) {
+            return $candidate
+        }
+    }
+    $found = Get-Command bcdedit -ErrorAction SilentlyContinue
+    if ($null -ne $found) {
+        return $found.Source
+    }
+    throw ("bcdedit.exe was not found. It is a 64 bit program, and a 32 bit process cannot run it." +
+        " Looked in: $($candidates -join ', ')")
+}
+
+function Invoke-Bcd {
+    <#
+    .SYNOPSIS
+        Runs bcdedit and returns its output.
+
+    .DESCRIPTION
+        The raw output can be put into the log, because bcdedit writes its
+        reasons to the error stream and those do not end up in the transcript
+        of Windows PowerShell. A failure carries the output with it, so that
+        the reason is in the message and not only in the log.
+    #>
+    param(
+        [Parameter(Mandatory)][string[]]$Arguments,
+        [switch]$LogOutput
+    )
+
+    $bcdedit = Get-BcdEditPath
+
+    # bcdedit writes to its error stream when it does not like something.
+    # That is read here instead of being turned into a terminating error, so
+    # that the reason it gives ends up in the log.
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = & $bcdedit @Arguments 2>&1
+        $code = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+
+    $text = (@($output) | ForEach-Object { [string]$_ }) -join "`r`n"
+
+    if ($LogOutput) {
+        Write-Host "bcdedit $($Arguments -join ' '):"
+        Write-Host $text
+    }
+
+    if ($code -ne 0) {
+        throw "bcdedit $($Arguments -join ' ') failed (exit $code):`r`n$text"
+    }
+    return $text
+}
+
+function Get-BcdIdentifier {
+    <#
+    .SYNOPSIS
+        The identifier of the object in a boot configuration dump.
+    .DESCRIPTION
+        The dump has to be taken with the verbose switch, because bcdedit
+        prints the name of a well known object, such as {bootmgr}, instead of
+        its identifier otherwise. The identifier is the first value in the
+        dump that has the shape of a GUID.
     #>
     param([Parameter(Mandatory)][string]$Text)
 
-    $match = [regex]::Match($Text, '(?ms)^displayorder\s+(.*?)(?=\r?\n\S|\z)')
+    $match = [regex]::Match($Text, $script:BcdIdentifierPattern)
     if (-not $match.Success) {
+        return $null
+    }
+    return $match.Value
+}
+
+function Get-BcdObject {
+    <#
+    .SYNOPSIS
+        The objects in a boot configuration dump, one record each.
+    .DESCRIPTION
+        The name of an object is the description it carries, and a copied
+        entry has no name of its own in bcdedit, so the name of the copy is
+        the description that was given to it.
+    #>
+    param([Parameter(Mandatory)][string]$Text)
+
+    $objects = @()
+    foreach ($match in [regex]::Matches($Text, $script:BcdObjectPattern)) {
+        $objects += [pscustomobject]@{
+            Name = $match.Groups['name'].Value.Trim()
+            Body = $match.Groups['body'].Value
+        }
+    }
+    return $objects
+}
+
+function Get-BcdEntryId {
+    <#
+    .SYNOPSIS
+        The identifier of the boot entry with a given description.
+    .DESCRIPTION
+        The name of the "description" property is in the language of the
+        machine, so the property is not looked for by its name. Its value is
+        not translated, and it is the name that was given to the entry. The
+        copied entry has no name of its own in bcdedit, so its identifier is a
+        real GUID and is the first one in the object.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Text,
+        [Parameter(Mandatory)][string]$Description
+    )
+
+    foreach ($object in (Get-BcdObject -Text $Text)) {
+        $matched = ($object.Name -eq $Description)
+        if (-not $matched) {
+            # The description is a property of the object as well, and its
+            # value is the same string. The property line is a name and a
+            # value, separated by at least two spaces.
+            $matched = ($object.Body -match ('(?m)^[^\r\n]*\s{2,}' + [regex]::Escape($Description) + '[ \t]*$'))
+        }
+        if (-not $matched) {
+            continue
+        }
+        $match = [regex]::Match($object.Name + "`r`n" + $object.Body, $script:BcdIdentifierPattern)
+        if ($match.Success) {
+            return $match.Value
+        }
+    }
+    return $null
+}
+
+function Get-BcdDisplayOrder {
+    <#
+    .SYNOPSIS
+        The firmware boot order from a dump of the firmware boot manager.
+    .DESCRIPTION
+        The order is the list of the identifiers that the manager tries, and
+        it is the only list of identifiers in that object. The name of the
+        property is in the language of the machine, so the list is not looked
+        for by its name: the identifiers of the dump are taken in order, and
+        the first one is the identifier of the manager itself.
+    #>
+    param([Parameter(Mandatory)][string]$Text)
+
+    $found = @([regex]::Matches($Text, $script:BcdIdentifierPattern) | ForEach-Object { $_.Value })
+    if ($found.Count -le 1) {
         return @()
     }
-    return @([regex]::Matches($match.Groups[1].Value, '\{(?:bootmgr|[0-9a-f-]{36})\}') | ForEach-Object { $_.Value })
+    return @($found[1..($found.Count - 1)])
+}
+
+function Get-BcdPropertyValue {
+    <#
+    .SYNOPSIS
+        The values of the properties in a dump whose value has a given shape.
+    .DESCRIPTION
+        A property line is a name and a value, separated by at least two
+        spaces. The name is in the language of the machine and is ignored
+        here; only the value is matched, which is not translated.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Text,
+        [Parameter(Mandatory)][string]$ValuePattern
+    )
+
+    $values = @()
+    foreach ($line in ($Text -split '\r?\n')) {
+        $trimmed = $line.Trim()
+        if (-not $trimmed) { continue }
+        $parts = $trimmed -split '\s{2,}', 2
+        if ($parts.Count -lt 2) { continue }
+        $value = $parts[1].Trim()
+        if ($value -match $ValuePattern) {
+            $values += $value
+        }
+    }
+    return $values
+}
+
+function Test-BcdPropertyValue {
+    <#
+    .SYNOPSIS
+        Whether a dump carries a property with a given value.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Text,
+        [Parameter(Mandatory)][string]$Value
+    )
+
+    foreach ($line in ($Text -split '\r?\n')) {
+        $trimmed = $line.Trim()
+        if (-not $trimmed) { continue }
+        $parts = $trimmed -split '\s{2,}', 2
+        if ($parts.Count -lt 2) { continue }
+        if ($parts[1].Trim() -eq $Value) {
+            return $true
+        }
+    }
+    return $false
 }

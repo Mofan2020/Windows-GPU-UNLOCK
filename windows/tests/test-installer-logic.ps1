@@ -248,23 +248,159 @@ $result = Test-InstallPreconditions
 Assert-True $result.CanInstall 'A prepared machine is still allowed'
 Assert-True (-not $result.FastStartup) 'The Fast Startup flag is cleared'
 
-Write-Host 'The firmware boot order'
+Write-Host 'The boot configuration parser'
 
-$dump = @"
-Firmware Boot Manager
----------------------
-identifier              {fwbootmgr}
-bootsequence            {9dea862c-5cdd-4e70-acc1-f32b344d4795}
-displayorder            {bootmgr}
-                        {9dea862c-5cdd-4e70-acc1-f32b344d4795}
-                        {11111111-2222-3333-4444-555555555555}
+# bcdedit prints the names of the properties in the language of the machine.
+# A Chinese Windows says "标识符" where an English one says "identifier", so
+# the parser must not look for a name at all. It looks for the values, and an
+# identifier always has the shape of a GUID.
+$english = @"
+Windows Boot Manager
+--------------------
+identifier              {bootmgr}
+device                  partition=\Device\HarddiskVolume3
+path                    \EFI\Microsoft\Boot\bootmgfw.efi
+description             Windows Boot Manager
+locale                  en-US
+"@
+Assert-True ($null -eq (Get-BcdIdentifier -Text $english)) `
+    'a dump that was not taken with the verbose switch has no identifier to read'
+
+$verbose = @"
+Windows Boot Manager
+--------------------
+identifier              {9dea862c-5cdd-4e70-acc1-f32b344d4795}
+device                  partition=\Device\HarddiskVolume3
+path                    \EFI\Microsoft\Boot\bootmgfw.efi
 description             Windows Boot Manager
 "@
-$order = @(Get-BcdDisplayOrder $dump)
-Assert-Equal 3 $order.Count 'The firmware boot order has three entries'
-Assert-Equal '{bootmgr}' $order[0] 'The Windows Boot Manager is first'
-Assert-Equal '{11111111-2222-3333-4444-555555555555}' $order[2] 'The last entry is read'
+Assert-Equal '{9dea862c-5cdd-4e70-acc1-f32b344d4795}' (Get-BcdIdentifier -Text $verbose) `
+    'the identifier is read from a verbose dump'
+Assert-Equal 'partition=\Device\HarddiskVolume3' `
+    (@(Get-BcdPropertyValue -Text $verbose -ValuePattern '^partition=')[0]) `
+    'the device is read by the shape of its value'
+Assert-True (Test-BcdPropertyValue -Text $verbose -Value '\EFI\Microsoft\Boot\bootmgfw.efi') `
+    'the path is found by its value'
+Assert-True (-not (Test-BcdPropertyValue -Text $verbose -Value '\EFI\Other\Other.efi')) `
+    'a value that is not there is not found'
+
+# The same dump in the language of a Chinese Windows. Nothing in it is known
+# to the parser except the values.
+$chinese = @"
+Windows 启动管理器
+--------------------
+标识符                 {9dea862c-5cdd-4e70-acc1-f32b344d4795}
+设备                   partition=\Device\HarddiskVolume3
+路径                   \EFI\Microsoft\Boot\bootmgfw.efi
+描述                   Windows 启动管理器
+"@
+Assert-Equal '{9dea862c-5cdd-4e70-acc1-f32b344d4795}' (Get-BcdIdentifier -Text $chinese) `
+    'the identifier is read from a Chinese dump'
+Assert-Equal 'partition=\Device\HarddiskVolume3' `
+    (@(Get-BcdPropertyValue -Text $chinese -ValuePattern '^partition=')[0]) `
+    'the device is read from a Chinese dump'
+Assert-True (Test-BcdPropertyValue -Text $chinese -Value '\EFI\Microsoft\Boot\bootmgfw.efi') `
+    'the path is found in a Chinese dump'
+
+# A dump with names that the parser has never seen.
+$unknown = @"
+Whatever this is
+----------------
+somethingelse         {12345678-1234-1234-1234-123456789abc}
+anotherthing          partition=\Device\HarddiskVolume9
+"@
+Assert-Equal '{12345678-1234-1234-1234-123456789abc}' (Get-BcdIdentifier -Text $unknown) `
+    'the identifier is found without any known name'
+Assert-Equal 'partition=\Device\HarddiskVolume9' `
+    (@(Get-BcdPropertyValue -Text $unknown -ValuePattern '^partition=')[0]) `
+    'the device is found without any known name'
+
+Write-Host 'The firmware boot order'
+
+$firmware = @"
+Firmware Boot Manager
+---------------------
+identifier              {a5a30fa2-3d06-4e9f-b5f4-a01df9d1fcba}
+displayorder            {9dea862c-5cdd-4e70-acc1-f32b344d4795}
+timeout                 0
+"@
+$order = @(Get-BcdDisplayOrder $firmware)
+Assert-Equal 1 $order.Count 'The firmware boot order has one entry'
+Assert-Equal '{9dea862c-5cdd-4e70-acc1-f32b344d4795}' $order[0] 'The Windows Boot Manager is the entry'
 Assert-Equal 0 @(Get-BcdDisplayOrder 'nothing here').Count 'A dump without an order gives no entries'
+
+# An order with more than one entry is printed on more than one line.
+$firmware = @"
+Firmware Boot Manager
+---------------------
+identifier              {a5a30fa2-3d06-4e9f-b5f4-a01df9d1fcba}
+displayorder            {11111111-2222-3333-4444-555555555555}
+                        {9dea862c-5cdd-4e70-acc1-f32b344d4795}
+timeout                 0
+"@
+$order = @(Get-BcdDisplayOrder $firmware)
+Assert-Equal 2 $order.Count 'The firmware boot order has two entries'
+Assert-Equal '{11111111-2222-3333-4444-555555555555}' $order[0] 'The first entry is read'
+Assert-Equal '{9dea862c-5cdd-4e70-acc1-f32b344d4795}' $order[1] 'The second entry is read'
+
+# The name of the property is in the language of the machine, so the order is
+# taken from the identifiers of the dump and not from a name.
+$firmware = @"
+固件启动管理器
+---------------------
+标识符                 {a5a30fa2-3d06-4e9f-b5f4-a01df9d1fcba}
+显示顺序               {11111111-2222-3333-4444-555555555555}
+超时                   0
+"@
+$order = @(Get-BcdDisplayOrder $firmware)
+Assert-Equal 1 $order.Count 'The firmware boot order is read in Chinese too'
+Assert-Equal '{11111111-2222-3333-4444-555555555555}' $order[0] 'The entry is the right one'
+
+Write-Host 'The boot entry that was made'
+
+$all = @"
+Windows Boot Manager
+--------------------
+identifier              {bootmgr}
+device                  partition=\Device\HarddiskVolume3
+path                    \EFI\Microsoft\Boot\bootmgfw.efi
+description             Windows Boot Manager
+
+Windows GPU UNLOCK
+------------------
+identifier              {7a7a7a7a-1b2b-3c3c-4d4d-5e5e5e5e5e5e}
+device                  partition=\Device\HarddiskVolume3
+path                    \EFI\WindowsGPUUnlock\UNLOCK.EFI
+description             Windows GPU UNLOCK
+
+Windows Memory Tester
+---------------------
+identifier              {memdiag}
+inherit                 {bootmgr}
+testsigning             Yes
+"@
+Assert-Equal '{7a7a7a7a-1b2b-3c3c-4d4d-5e5e5e5e5e5e}' `
+    (Get-BcdEntryId -Text $all -Description 'Windows GPU UNLOCK') `
+    'The entry is found by its description'
+Assert-True ($null -eq (Get-BcdEntryId -Text $all -Description 'Windows Boot Manager')) `
+    'A well known object has no identifier of its own to read'
+Assert-True ($null -eq (Get-BcdEntryId -Text $all -Description 'Windows Memory Tester')) `
+    'A well known object is not found by its name either'
+Assert-True ($null -eq (Get-BcdEntryId -Text $all -Description 'Nothing Like This')) `
+    'An entry that is not there is not found'
+
+# The same list in Chinese.
+$all = @"
+Windows GPU UNLOCK
+------------------
+标识符                 {7a7a7a7a-1b2b-3c3c-4d4d-5e5e5e5e5e5e}
+设备                   partition=\Device\HarddiskVolume3
+路径                   \EFI\WindowsGPUUnlock\UNLOCK.EFI
+描述                   Windows GPU UNLOCK
+"@
+Assert-Equal '{7a7a7a7a-1b2b-3c3c-4d4d-5e5e5e5e5e5e}' `
+    (Get-BcdEntryId -Text $all -Description 'Windows GPU UNLOCK') `
+    'The entry is found in a Chinese dump as well'
 
 Write-Host 'The EFI system partition'
 
@@ -406,11 +542,20 @@ Assert-True ($transcriptAt -ge 0) 'the entry point opens a log'
 Assert-True ($guardAt -lt $transcriptAt) 'the guard comes before the log is opened'
 
 # bcdedit is called by its path, and not by its name, because the name is
-# only found in a 64 bit process.
+# only found in a 64 bit process. The caller lives in the common file, so
+# that the installer and the uninstaller use the same one.
+$commonSource = Get-Content (Join-Path $root 'windows/installer/Installer-Common.ps1') -Raw
 $installSource = Get-Content (Join-Path $root 'windows/installer/Install-GpuUnlock.ps1') -Raw
-Assert-Contains $installSource 'Get-BcdEditPath' 'bcdedit is found by its path'
+Assert-Contains $commonSource 'Get-BcdEditPath' 'bcdedit is found by its path'
+Assert-Contains $commonSource 'Sysnative\bcdedit.exe' 'the 64 bit bcdedit is looked for'
 Assert-True (-not $installSource.Contains('& bcdedit ')) 'bcdedit is not called by its name'
-Assert-Contains $installSource 'Sysnative\bcdedit.exe' 'the 64 bit bcdedit is looked for'
+Assert-True (-not $commonSource.Contains('& bcdedit ')) 'bcdedit is not called by its name in the common file'
+
+# The parser must not look for the name of a property, because the name is in
+# the language of the machine and the value is not.
+foreach ($property in @('identifier', 'displayorder', 'description', 'device', 'path')) {
+    Assert-True (-not $commonSource.Contains("$property\s")) "the parser does not look for the property $property"
+}
 
 # A run that stopped halfway leaves the files on the partition and the drive
 # letter with it, but no record. The letter has to be given back then too,
