@@ -222,6 +222,34 @@ jobs:
             Write-Host "OK   $name  $actual"
           }
 
+  boot:
+    name: boot configuration
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v5
+
+      # The boot configuration is read and changed with bcdedit, and its
+      # output is parsed by the installer. The names of the properties in
+      # that output are in the language of the machine, and bcdedit prints
+      # a well known name instead of the real identifier unless it is asked
+      # to be verbose. The output is therefore taken here, on a real
+      # Windows, so that the parser is written against it and not against
+      # a guess.
+      - name: Take the boot configuration apart
+        shell: pwsh
+        run: |
+          $bcdedit = Join-Path $env:SystemRoot 'System32\bcdedit.exe'
+          Write-Host '--- bcdedit /enum {bootmgr} ---'
+          & $bcdedit /enum '{bootmgr}'
+          Write-Host '--- bcdedit /enum {bootmgr} /v ---'
+          & $bcdedit /enum '{bootmgr}' /v
+          Write-Host '--- bcdedit /enum {fwbootmgr} ---'
+          & $bcdedit /enum '{fwbootmgr}'
+          Write-Host '--- bcdedit /enum {fwbootmgr} /v ---'
+          & $bcdedit /enum '{fwbootmgr}' /v
+          Write-Host '--- bcdedit /enum all (the first sixty lines) ---'
+          & $bcdedit /enum all | Select-Object -First 60
+
   installer:
     name: installer package
     runs-on: windows-2022
