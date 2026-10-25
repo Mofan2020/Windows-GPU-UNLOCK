@@ -261,8 +261,8 @@ jobs:
 
           $description = 'Windows GPU UNLOCK (CI)'
           $bcdedit = Join-Path $env:SystemRoot 'System32\bcdedit.exe'
-          $newId = ''
           $beforeOrder = @()
+          $made = @()
 
           try {
             # The identifier of the Windows Boot Manager.
@@ -280,58 +280,58 @@ jobs:
             if ($beforeOrder.Count -eq 0) { throw 'the firmware boot order could not be read' }
             Write-Host "OK   the firmware boot order is $($beforeOrder -join ', ')"
 
-            # The entry that the installer creates.
-            $existing = Get-BcdEntryId -Text (Invoke-Bcd @('/enum', 'all')) -Description $description
-            if ($existing) { throw 'a boot entry with that name is already there' }
-
-            # An entry that is made from nothing, with an identifier that is
-            # known from the start. Nothing is inherited from the Windows Boot
-            # Manager, so there is nothing in it that points at a Windows
-            # loader.
-            $created = '{7c1f9d20-6f0a-4a1e-9d33-0b5e5a5c1a01}'
-            [void](Invoke-Bcd @('/create', $created, '/d', $description, '/application'))
-            Write-Host '--- bcdedit /enum the created entry ---'
-            & $bcdedit /enum $created
-            Write-Host '--- bcdedit /enum the created entry, verbose ---'
-            & $bcdedit /enum $created /v
-
-            [void](Invoke-Bcd @('/set', $created, 'device', $managerDevices[0]))
-            [void](Invoke-Bcd @('/set', $created, 'path', '\EFI\WindowsGPUUnlock\UNLOCK.EFI'))
-            $entryText = Invoke-Bcd @('/enum', $created, '/v') -LogOutput
-            $entryDevices = @(Get-BcdPropertyValue -Text $entryText -ValuePattern '^partition=')
-            Write-Host "OK   the entry boots from $($entryDevices -join ', ')"
-            if (-not (Test-BcdPropertyValue -Text $entryText -Value '\EFI\WindowsGPUUnlock\UNLOCK.EFI')) {
-              throw 'the boot entry does not point at the staged application'
+            # Whether a change to the boot configuration stays at all. A runner
+            # on which it does not would say that every entry was made, and
+            # then not have it.
+            [void](Invoke-Bcd @('/set', '{bootmgr}', 'timeout', '30') -LogOutput)
+            $probe = Invoke-Bcd @('/enum', '{bootmgr}', '/v') -LogOutput
+            if (-not (Test-BcdPropertyValue -Text $probe -Value '30')) {
+              throw 'the boot configuration does not keep a change'
             }
-            Write-Host 'OK   the entry points at the staged application'
+            Write-Host 'OK   the boot configuration keeps a change'
 
-            $newOrder = @($created) + @($beforeOrder | Where-Object { $_ -ne $created })
-            [void](Invoke-Bcd (@('/set', '{fwbootmgr}', 'displayorder') + $newOrder))
-            $afterOrder = @(Get-BcdDisplayOrder (Invoke-Bcd @('/enum', '{fwbootmgr}', '/v') -LogOutput))
-            if (($afterOrder -join ',') -ne ($newOrder -join ',')) {
-              throw "the firmware boot order does not match the plan: expected $($newOrder -join ','), got $($afterOrder -join ',')"
+            # Every way of making an entry is tried here, and the whole boot
+            # configuration is printed after each of them, so that the way
+            # that works is written down instead of guessed at.
+            $variants = @(
+                @{ Name = 'create with application'; Id = '{7c1f9d20-6f0a-4a1e-9d33-0b5e5a5c1a01}'
+                   Args = @('/create', '{7c1f9d20-6f0a-4a1e-9d33-0b5e5a5c1a01}', '/d', 'CI application', '/application') },
+                @{ Name = 'create with inherit'; Id = '{7c1f9d20-6f0a-4a1e-9d33-0b5e5a5c1a02}'
+                   Args = @('/create', '{7c1f9d20-6f0a-4a1e-9d33-0b5e5a5c1a02}', '/d', 'CI inherit', '/inherit', '{bootmgr}') },
+                @{ Name = 'create plain'; Id = '{7c1f9d20-6f0a-4a1e-9d33-0b5e5a5c1a03}'
+                   Args = @('/create', '{7c1f9d20-6f0a-4a1e-9d33-0b5e5a5c1a03}', '/d', 'CI plain') },
+                @{ Name = 'copy of the boot manager'; Id = ''
+                   Args = @('/copy', '{bootmgr}', '/d', 'CI copy') }
+            )
+
+            foreach ($variant in $variants) {
+              Write-Host "=== $($variant.Name) ==="
+              [void](Invoke-Bcd $variant.Args -LogOutput)
+              Write-Host "--- the command returned $LASTEXITCODE ---"
+              if ($variant.Id) {
+                $made += $variant.Id
+                Write-Host "--- bcdedit /enum $($variant.Id) ---"
+                & $bcdedit /enum $variant.Id
+                & $bcdedit /enum $variant.Id /v
+              }
+              Write-Host '--- bcdedit /enum all ---'
+              & $bcdedit /enum all
             }
-            Write-Host 'OK   the entry is first in the firmware boot order'
-            $newId = $created
 
-            # The same thing, but made as a copy of the Windows Boot Manager,
-            # so that the output of both ways can be compared.
-            [void](Invoke-Bcd @('/copy', '{bootmgr}', '/d', 'Windows GPU UNLOCK (copy)'))
-            Write-Host '--- bcdedit /enum all after the copy ---'
-            & $bcdedit /enum all
-            $copyId = Get-BcdEntryId -Text (Invoke-Bcd @('/enum', 'all')) -Description 'Windows GPU UNLOCK (copy)'
-            Write-Host "the copy was found as '$copyId'"
-            Write-Host '--- bcdedit /enum all, verbose ---'
-            & $bcdedit /enum all /v
-            if ($copyId) {
-              & $bcdedit /delete $copyId
+            # The entries that were made, found by their description, and the
+            # way the installer looks for them.
+            foreach ($variant in $variants) {
+              $name = $variant.Args[3]
+              $found = Get-BcdEntryId -Text (Invoke-Bcd @('/enum', 'all')) -Description $name
+              Write-Host "the entry '$name' was found as '$found'"
             }
           } finally {
             # The runner has to boot the way it did before.
             $bcdedit = Join-Path $env:SystemRoot 'System32\bcdedit.exe'
-            if ($newId) {
-              & $bcdedit /delete $newId
+            foreach ($id in $made) {
+              & $bcdedit /delete $id
             }
+            & $bcdedit /enum all | Select-String -Pattern 'CI ' -Context 0,3
             if ($beforeOrder.Count -gt 0) {
               & $bcdedit /set '{fwbootmgr}' displayorder $beforeOrder
             }
