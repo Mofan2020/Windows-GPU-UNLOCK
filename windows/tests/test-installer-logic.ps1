@@ -275,6 +275,23 @@ Assert-True (-not $result.FastStartup) 'The Fast Startup flag is cleared'
 
 Write-Host 'The boot configuration parser'
 
+# bcdedit does not always report a failure in its exit code. It writes the
+# reason into its output and returns zero all the same, so the output has to
+# be read as well. That is what the installer does now, and the reasons that
+# were seen on a real Windows are the ones that are checked here.
+Assert-True (-not (Test-BcdFailure -Text 'The operation completed successfully.')) `
+    'a command that worked is not a failure'
+Assert-True (Test-BcdFailure -Text 'An error occurred while attempting the specified create operation.') `
+    'a command that could not be carried out is a failure'
+Assert-True (Test-BcdFailure -Text 'The application type switch specified is not valid.') `
+    'a switch that does not exist is a failure'
+Assert-True (Test-BcdFailure -Text 'The request is not supported.') `
+    'a request that is not supported is a failure'
+Assert-True (Test-BcdFailure -Text 'An error occurred while attempting to reference the specified entry.') `
+    'a reference to an entry that is not there is a failure'
+Assert-True (-not (Test-BcdFailure -Text 'There are no matching objects or the store is empty.')) `
+    'an entry that is not there is an answer and not a failure'
+
 # bcdedit prints the names of the properties in the language of the machine.
 # A Chinese Windows says "标识符" where an English one says "identifier", so
 # the parser must not look for a name at all. It looks for the values, and an
@@ -426,6 +443,24 @@ Windows GPU UNLOCK
 Assert-Equal '{7a7a7a7a-1b2b-3c3c-4d4d-5e5e5e5e5e5e}' `
     (Get-BcdEntryId -Text $all -Description 'Windows GPU UNLOCK') `
     'The entry is found in a Chinese dump as well'
+
+# bcdedit ends its lines with a carriage return and a line feed. A pattern
+# that expects the end of the line right after the value does not match that,
+# and the entry was not found on a Windows. The dumps that Windows produces
+# are therefore read with the same endings.
+$crlf = ($all -replace "`r`n", "`n") -replace "`n", "`r`n"
+Assert-Equal '{7a7a7a7a-1b2b-3c3c-4d4d-5e5e5e5e5e5e}' `
+    (Get-BcdEntryId -Text $crlf -Description 'Windows GPU UNLOCK') `
+    'The entry is found in a dump with CRLF line endings'
+
+$crlf = ($verbose -replace "`r`n", "`n") -replace "`n", "`r`n"
+Assert-Equal '{9dea862c-5cdd-4e70-acc1-f32b344d4795}' (Get-BcdIdentifier -Text $crlf) `
+    'The identifier is read from a dump with CRLF line endings'
+Assert-Equal 'partition=\Device\HarddiskVolume3' `
+    (@(Get-BcdPropertyValue -Text $crlf -ValuePattern '^partition=')[0]) `
+    'The device is read from a dump with CRLF line endings'
+Assert-True (Test-BcdPropertyValue -Text $crlf -Value '\EFI\Microsoft\Boot\bootmgfw.efi') `
+    'The path is found in a dump with CRLF line endings'
 
 Write-Host 'The EFI system partition'
 

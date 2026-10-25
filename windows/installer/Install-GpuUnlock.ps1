@@ -184,86 +184,29 @@ function Install-GpuUnlock {
     & (Get-BcdEditPath) /export (Join-Path $backupRoot 'BCD-export') | Out-Null
     Write-Ok ("Boot configuration exported to {0}" -f $backupRoot)
 
+    $expectedPath = $script:EfiRelativeDirectory + '\' + $script:EfiApplicationName
+
+    # An entry of an earlier run is taken out of the way first. It is only
+    # touched when it points at the staged application, so that an entry that
+    # belongs to the user is never removed.
     $existing = Get-BcdEntryId -Text (Invoke-Bcd @('/enum', 'all')) -Description $Description
     if ($existing) {
-        throw "A boot entry named '$Description' already exists. Remove it first, or choose another name."
-    }
-
-    # The Windows Boot Manager. The dump is taken with the verbose switch,
-    # because bcdedit prints the name of a well known object, such as
-    # {bootmgr}, instead of its identifier otherwise. The names of the
-    # properties in the dump are in the language of the machine, so nothing
-    # is looked for by a name: the identifier is the first value in the dump
-    # that has the shape of a GUID.
-    $managerText = Invoke-Bcd @('/enum', '{bootmgr}', '/v') -LogOutput
-    $managerId = Get-BcdIdentifier -Text $managerText
-    if (-not $managerId) {
-        throw 'The identifier of the Windows Boot Manager could not be read'
-    }
-
-    # The device the Windows Boot Manager boots from. That is the partition
-    # the boot manager itself lives on, which is the EFI system partition.
-    $managerDevices = @(Get-BcdPropertyValue -Text $managerText -ValuePattern '^partition=')
-    $managerDevice = ''
-    if ($managerDevices.Count -gt 0) {
-        $managerDevice = $managerDevices[0]
-    }
-
-    # The boot order before the change, so that it can be restored.
-    $beforeOrder = @(Get-BcdDisplayOrder (Invoke-Bcd @('/enum', '{fwbootmgr}', '/v') -LogOutput))
-    if ($beforeOrder.Count -eq 0) {
-        $beforeOrder = @($managerId)
-    }
-
-    [void](Invoke-Bcd @('/copy', '{bootmgr}', '/d', $Description))
-    $newId = Get-BcdEntryId -Text (Invoke-Bcd @('/enum', 'all')) -Description $Description
-    if (-not $newId) {
-        throw 'The new boot entry could not be found after it was created'
-    }
-
-    # The entry is a copy of the Windows Boot Manager, so it starts out with
-    # the device of that boot manager, which is the partition the application
-    # was staged on. The device is checked and, if it names another partition
-    # or none at all, it is set to the one of the Windows Boot Manager. The
-    # drive letter is not used for it, because a letter is not known to the
-    # firmware at boot time.
-    $expectedPath = $script:EfiRelativeDirectory + '\' + $script:EfiApplicationName
-    $entryText = Invoke-Bcd @('/enum', $newId, '/v') -LogOutput
-    $entryDevices = @(Get-BcdPropertyValue -Text $entryText -ValuePattern '^partition=')
-    if ($entryDevices.Count -eq 0 -or ($managerDevice -and $entryDevices[0] -ne $managerDevice)) {
-        if (-not $managerDevice) {
-            $managerDevice = 'partition=' + $espLetter + ':'
+        $existingText = Invoke-Bcd @('/enum', $existing, '/v')
+        if (-not (Test-BcdPropertyValue -Text $existingText -Value $expectedPath)) {
+            throw "An entry named '$Description' already exists and is not the one of this tool. Remove it first, or choose another name."
         }
-        [void](Invoke-Bcd @('/set', $newId, 'device', $managerDevice))
-        $entryText = Invoke-Bcd @('/enum', $newId, '/v') -LogOutput
-        $entryDevices = @(Get-BcdPropertyValue -Text $entryText -ValuePattern '^partition=')
-        if ($entryDevices.Count -eq 0) {
-            throw "The boot entry does not name the partition it boots from. It says:`r`n$entryText"
-        }
-    }
-    Write-Ok ("The boot entry boots from {0}" -f $entryDevices[0])
-
-    # Point the entry at the staged application on the EFI partition.
-    [void](Invoke-Bcd @('/set', $newId, 'path', $expectedPath))
-
-    # Put the entry first in the firmware boot order, so that the unlock runs
-    # before the NVIDIA driver binds the card. The Windows Boot Manager stays
-    # in the order behind it, so the machine still boots if the application
-    # returns without starting Windows.
-    $newOrder = @($newId) + @($beforeOrder | Where-Object { $_ -ne $newId })
-    [void](Invoke-Bcd (@('/set', '{fwbootmgr}', 'displayorder') + $newOrder))
-
-    # Read the result back.
-    $afterOrder = @(Get-BcdDisplayOrder (Invoke-Bcd @('/enum', '{fwbootmgr}', '/v') -LogOutput))
-    if (($afterOrder -join ',') -ne ($newOrder -join ',')) {
-        throw "The firmware boot order does not match the plan. Expected $($newOrder -join ','), found $($afterOrder -join ',')"
-    }
-    $afterText = Invoke-Bcd @('/enum', $newId, '/v') -LogOutput
-    if (-not (Test-BcdPropertyValue -Text $afterText -Value $expectedPath)) {
-        throw "The boot entry does not point at the staged application. It says:`r`n$afterText"
+        Write-Note "The entry of an earlier run ($existing) is replaced."
+        [void](Invoke-Bcd @('/delete', $existing))
     }
 
+    # The entry itself. The boot manager is copied, so that the entry
+    # inherits the partition that the boot manager boots from, and it is put
+    # first in the firmware boot order, so that the unlock runs before the
+    # driver of the card binds it.
+    $entry = Register-BcdBootEntry -Description $Description -Path $expectedPath
+    $newId = $entry.Identifier
     Write-Ok "Boot entry '$Description' registered as $newId"
+    Write-Ok ("It boots from {0}" -f $entry.Device)
     Write-Ok 'It is first in the firmware boot order, so it runs before Windows starts'
 
     $state = [ordered]@{
@@ -280,7 +223,7 @@ function Install-GpuUnlock {
         EspPartitionNumber = $esp.PartitionNumber
         StagingRoot       = $stagingRoot
         BackupRoot        = $backupRoot
-        BootOrderBefore   = @($beforeOrder)
+        BootOrderBefore   = @($entry.OrderBefore)
         InstalledUtc      = [DateTime]::UtcNow.ToString('o')
     }
     $state | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $script:StateFile -Encoding UTF8
@@ -316,23 +259,27 @@ function Uninstall-GpuUnlock {
 
     Write-Step 'Removing the boot entry'
 
-    $existing = Get-BcdEntryId -Text (Invoke-Bcd @('/enum', 'all')) -Description $Description
+    # The identifier of the entry comes from the record of the installation.
+    # The name is only looked up when there is no record, because the name is
+    # what a person sees and the identifier is what bcdedit works with.
+    $existing = ''
+    if ($state.EntryId) {
+        $existing = [string]$state.EntryId
+    }
+    if (-not $existing) {
+        $existing = Get-BcdEntryId -Text (Invoke-Bcd @('/enum', 'all')) -Description $Description
+    }
     if ($existing) {
-        # Put the boot order back the way it was before the installation.
-        $current = @(Get-BcdDisplayOrder (Invoke-Bcd @('/enum', '{fwbootmgr}', '/v') -LogOutput))
-        $restored = @($current | Where-Object { $_ -ne $existing })
-        $original = @()
+        # The order is put back the way it was before the installation, and
+        # the entry itself is taken away as well, and not only put out of the
+        # order.
+        $orderBefore = @()
         if ($state.bootOrderBefore) {
-            $original = @($state.bootOrderBefore | Where-Object { $_ -ne $existing })
+            $orderBefore = @($state.bootOrderBefore)
         }
-        if ($original.Count -gt 0) {
-            [void](Invoke-Bcd (@('/set', '{fwbootmgr}', 'displayorder') + $original))
-        } elseif ($restored.Count -gt 0) {
-            [void](Invoke-Bcd (@('/set', '{fwbootmgr}', 'displayorder') + $restored))
-        }
+        $after = @(Unregister-BcdBootEntry -Identifier $existing -OrderBefore $orderBefore)
         Write-Ok "Boot entry '$Description' removed"
 
-        $after = @(Get-BcdDisplayOrder (Invoke-Bcd @('/enum', '{fwbootmgr}', '/v') -LogOutput))
         if ($after -contains $existing) {
             throw 'The boot entry is still in the firmware boot order'
         }

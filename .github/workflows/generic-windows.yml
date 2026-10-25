@@ -260,89 +260,46 @@ jobs:
           . ./windows/installer/Installer-Common.ps1
 
           $description = 'Windows GPU UNLOCK (CI)'
-          $bcdedit = Join-Path $env:SystemRoot 'System32\bcdedit.exe'
-          $beforeOrder = @()
-          $made = @()
+          $path = '\EFI\WindowsGPUUnlock\UNLOCK.EFI'
+          $entry = $null
 
           try {
-            # What bcdedit says it can do. The answer is written down here,
-            # because it is the answer that the installer has to give.
-            Write-Host '=== bcdedit /? ==='
-            & $bcdedit /? 2>&1 | Out-String -Width 200
+            # The whole registration cycle, with the functions that the
+            # installer itself uses.
+            $entry = Register-BcdBootEntry -Description $description -Path $path
+            Write-Host "OK   the entry is $($entry.Identifier)"
+            Write-Host "OK   it boots from $($entry.Device)"
+            Write-Host "OK   the order before was $($entry.OrderBefore -join ', ')"
+            Write-Host "OK   the order now is $($entry.OrderAfter -join ', ')"
 
-            # The identifier of the Windows Boot Manager.
-            $managerText = Invoke-Bcd @('/enum', '{bootmgr}', '/v') -LogOutput
-            $managerId = Get-BcdIdentifier -Text $managerText
-            if (-not $managerId) { throw 'the identifier of the Windows Boot Manager could not be read' }
-            Write-Host "OK   the Windows Boot Manager is $managerId"
-
-            $managerDevices = @(Get-BcdPropertyValue -Text $managerText -ValuePattern '^partition=')
-            if ($managerDevices.Count -eq 0) { throw 'the Windows Boot Manager does not name a device' }
-            Write-Host "OK   the Windows Boot Manager boots from $($managerDevices[0])"
-
-            # The firmware boot order before the change.
-            $beforeOrder = @(Get-BcdDisplayOrder (Invoke-Bcd @('/enum', '{fwbootmgr}', '/v') -LogOutput))
-            if ($beforeOrder.Count -eq 0) { throw 'the firmware boot order could not be read' }
-            Write-Host "OK   the firmware boot order is $($beforeOrder -join ', ')"
-
-            # Whether a change to the boot configuration stays at all. A runner
-            # on which it does not would say that every entry was made, and
-            # then not have it.
-            [void](Invoke-Bcd @('/set', '{bootmgr}', 'timeout', '31') -LogOutput)
-            $probe = Invoke-Bcd @('/enum', '{bootmgr}', '/v') -LogOutput
-            Write-Host ("the timeout reads back as: {0}" -f (@(Get-BcdPropertyValue -Text $probe -ValuePattern '^\d+$') -join ', '))
-            [void](Invoke-Bcd @('/set', '{bootmgr}', 'timeout', '30') -LogOutput)
-
-            # Every way of making an entry is tried here, and the whole boot
-            # configuration is printed after each of them, so that the way
-            # that works is written down instead of guessed at.
-            $variants = @(
-                @{ Name = 'copy of the boot manager'; Id = ''
-                   Args = @('/copy', '{bootmgr}', '/d', 'CI copy') },
-                @{ Name = 'create plain'; Id = '{7c1f9d20-6f0a-4a1e-9d33-0b5e5a5c1a03}'
-                   Args = @('/create', '{7c1f9d20-6f0a-4a1e-9d33-0b5e5a5c1a03}', '/d', 'CI plain') },
-                @{ Name = 'create with a device'; Id = '{7c1f9d20-6f0a-4a1e-9d33-0b5e5a5c1a04}'
-                   Args = @('/create', '{7c1f9d20-6f0a-4a1e-9d33-0b5e5a5c1a04}', '/d', 'CI device', '/device', $managerDevices[0]) },
-                @{ Name = 'create with a system type'; Id = '{7c1f9d20-6f0a-4a1e-9d33-0b5e5a5c1a05}'
-                   Args = @('/create', '{7c1f9d20-6f0a-4a1e-9d33-0b5e5a5c1a05}', '/d', 'CI system', '/system', 'true') }
-            )
-
-            foreach ($variant in $variants) {
-              Write-Host "=== $($variant.Name) ==="
-              try {
-                [void](Invoke-Bcd $variant.Args -LogOutput)
-              } catch {
-                Write-Host "FAILED: $($_.Exception.Message)"
-              }
-              if ($variant.Id) {
-                $made += $variant.Id
-                Write-Host "--- bcdedit /enum $($variant.Id) ---"
-                & $bcdedit /enum $variant.Id
-                & $bcdedit /enum $variant.Id /v
-              }
-              Write-Host '--- bcdedit /enum all ---'
-              & $bcdedit /enum all
+            # The entry is found by its description as well, which is how a
+            # person recognises it.
+            $found = Get-BcdEntryId -Text (Invoke-Bcd @('/enum', 'all')) -Description $description
+            Write-Host "the entry was found by its description as '$found'"
+            if ($found -ne $entry.Identifier) {
+              throw "the entry was found as '$found' and not as '$($entry.Identifier)'"
             }
+            Write-Host 'OK   the entry is found by its description'
 
-            # The entries that were made, found by their description, and the
-            # way the installer looks for them.
-            foreach ($variant in $variants) {
-              $name = $variant.Args[3]
-              $found = Get-BcdEntryId -Text (Invoke-Bcd @('/enum', 'all')) -Description $name
-              Write-Host "the entry '$name' was found as '$found'"
+            # It is the first one in the firmware boot order.
+            $order = @(Get-BcdDisplayOrder (Invoke-Bcd @('/enum', '{fwbootmgr}', '/v')))
+            if ($order[0] -ne $entry.Identifier) {
+              throw "the entry is not first in the firmware boot order: $($order -join ', ')"
             }
+            Write-Host 'OK   the entry is first in the firmware boot order'
+
+            # The entry says what it should say.
+            & (Join-Path $env:SystemRoot 'System32\bcdedit.exe') /enum $entry.Identifier /v
           } finally {
-            # The runner has to boot the way it did before.
-            $bcdedit = Join-Path $env:SystemRoot 'System32\bcdedit.exe'
-            foreach ($id in $made) {
-              & $bcdedit /delete $id
-            }
-            & $bcdedit /enum all | Select-String -Pattern 'CI ' -Context 0,3
-            if ($beforeOrder.Count -gt 0) {
-              & $bcdedit /set '{fwbootmgr}' displayorder $beforeOrder
+            if ($entry) {
+              $after = @(Unregister-BcdBootEntry -Identifier $entry.Identifier -OrderBefore $entry.OrderBefore)
+              Write-Host "OK   the entry is gone, the order is now $($after -join ', ')"
+              if ($after -contains $entry.Identifier) {
+                throw 'the entry is still in the firmware boot order'
+              }
             }
             Write-Host '--- the boot configuration was put back ---'
-            & $bcdedit /enum '{fwbootmgr}' /v
+            & (Join-Path $env:SystemRoot 'System32\bcdedit.exe') /enum '{fwbootmgr}' /v
           }
 
   installer:

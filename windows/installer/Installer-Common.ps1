@@ -285,6 +285,23 @@ function Get-BcdEditPath {
         " Looked in: $($candidates -join ', ')")
 }
 
+function Test-BcdFailure {
+    <#
+    .SYNOPSIS
+        Whether the output of bcdedit says that the command failed.
+    .DESCRIPTION
+        bcdedit does not always report a failure in its exit code. It writes
+        the reason into its output and returns zero all the same, so the
+        output has to be read as well.
+    #>
+    param([Parameter(Mandatory)][string]$Text)
+
+    if ($Text -match $script:BcdFailurePattern) {
+        return $true
+    }
+    return $false
+}
+
 function Invoke-Bcd {
     <#
     .SYNOPSIS
@@ -325,7 +342,7 @@ function Invoke-Bcd {
 
     # A failure is reported in the exit code and in the output. bcdedit
     # returns zero for some of them, so the output is what decides.
-    if ($code -ne 0 -or $text -match $script:BcdFailurePattern) {
+    if ($code -ne 0 -or (Test-BcdFailure -Text $text)) {
         if ($IgnoreFailure) {
             return $null
         }
@@ -382,8 +399,12 @@ function Get-BcdEntryId {
         The name of the "description" property is in the language of the
         machine, so the property is not looked for by its name. Its value is
         not translated, and it is the name that was given to the entry. The
-        copied entry has no name of its own in bcdedit, so its identifier is a
-        real GUID and is the first one in the object.
+        name of the object in the dump is not that value: bcdedit prints the
+        kind of the object there, so a copied Windows Boot Manager is called
+        "Windows Boot Manager" whatever its description says.
+
+        The copied entry has no name of its own in bcdedit, so its
+        identifier is a real GUID and is the first one in the object.
     #>
     param(
         [Parameter(Mandatory)][string]$Text,
@@ -396,7 +417,16 @@ function Get-BcdEntryId {
             # The description is a property of the object as well, and its
             # value is the same string. The property line is a name and a
             # value, separated by at least two spaces.
-            $matched = ($object.Body -match ('(?m)^[^\r\n]*\s{2,}' + [regex]::Escape($Description) + '[ \t]*$'))
+            foreach ($line in ($object.Body -split '\r?\n')) {
+                $trimmed = $line.Trim()
+                if (-not $trimmed) { continue }
+                $parts = $trimmed -split '\s{2,}', 2
+                if ($parts.Count -lt 2) { continue }
+                if ($parts[1].Trim() -eq $Description) {
+                    $matched = $true
+                    break
+                }
+            }
         }
         if (-not $matched) {
             continue
@@ -477,4 +507,148 @@ function Test-BcdPropertyValue {
         }
     }
     return $false
+}
+
+function Register-BcdBootEntry {
+    <#
+    .SYNOPSIS
+        Registers a boot entry that starts the unlock application.
+
+    .DESCRIPTION
+        The entry is a copy of the Windows Boot Manager, so that it inherits
+        the partition that the boot manager itself boots from. bcdedit says
+        which identifier the new entry got, and that is read from its answer
+        rather than looked for afterwards: a name is what a person sees, and
+        the identifier is what bcdedit works with.
+
+        The order in which the firmware tries the entries is changed as well,
+        so that the new entry comes first. The order before the change is
+        returned, so that it can be put back later.
+
+    .PARAMETER Description
+        The name the entry carries in the boot menu.
+
+    .PARAMETER Path
+        The path of the EFI application, on the partition the entry boots
+        from.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Description,
+        [Parameter(Mandatory)][string]$Path
+    )
+
+    # The Windows Boot Manager. The dump is taken with the verbose switch,
+    # because bcdedit prints the name of a well known object, such as
+    # {bootmgr}, instead of its identifier otherwise. The names of the
+    # properties in the dump are in the language of the machine, so nothing is
+    # looked for by a name: the identifier is the first value in the dump
+    # that has the shape of a GUID.
+    $managerText = Invoke-Bcd @('/enum', '{bootmgr}', '/v') -LogOutput
+    $managerId = Get-BcdIdentifier -Text $managerText
+    if (-not $managerId) {
+        throw 'The identifier of the Windows Boot Manager could not be read'
+    }
+
+    # The device the Windows Boot Manager boots from. That is the partition
+    # the boot manager itself lives on, which is the EFI system partition.
+    $managerDevices = @(Get-BcdPropertyValue -Text $managerText -ValuePattern '^partition=')
+    $managerDevice = ''
+    if ($managerDevices.Count -gt 0) {
+        $managerDevice = $managerDevices[0]
+    }
+
+    # The boot order before the change, so that it can be restored.
+    $beforeOrder = @(Get-BcdDisplayOrder (Invoke-Bcd @('/enum', '{fwbootmgr}', '/v') -LogOutput))
+    if ($beforeOrder.Count -eq 0) {
+        $beforeOrder = @($managerId)
+    }
+
+    # The copy.
+    $copyText = Invoke-Bcd @('/copy', '{bootmgr}', '/d', $Description) -LogOutput
+    $newId = Get-BcdIdentifier -Text $copyText
+    if (-not $newId) {
+        throw 'The identifier of the new boot entry was not given by bcdedit'
+    }
+
+    # The device. The copy starts out with the one of the Windows Boot
+    # Manager. It is checked and, if it names another partition or none at
+    # all, it is set to the one of the boot manager. A drive letter is not
+    # used for it, because a letter is not known to the firmware at boot
+    # time.
+    $entryText = Invoke-Bcd @('/enum', $newId, '/v') -LogOutput
+    $entryDevices = @(Get-BcdPropertyValue -Text $entryText -ValuePattern '^partition=')
+    if ($entryDevices.Count -eq 0 -or ($managerDevice -and $entryDevices[0] -ne $managerDevice)) {
+        if (-not $managerDevice) {
+            throw 'The Windows Boot Manager does not name a device, and the new entry does not either'
+        }
+        [void](Invoke-Bcd @('/set', $newId, 'device', $managerDevice))
+        $entryText = Invoke-Bcd @('/enum', $newId, '/v') -LogOutput
+        $entryDevices = @(Get-BcdPropertyValue -Text $entryText -ValuePattern '^partition=')
+        if ($entryDevices.Count -eq 0) {
+            throw 'The boot entry does not name the partition it boots from'
+        }
+    }
+
+    # The path of the application.
+    [void](Invoke-Bcd @('/set', $newId, 'path', $Path))
+
+    # The firmware boot order. The new entry comes first, so that the unlock
+    # runs before the driver of the card binds it. The Windows Boot Manager
+    # stays in the order behind it, so that the machine still boots if the
+    # application returns without starting Windows.
+    $newOrder = @($newId) + @($beforeOrder | Where-Object { $_ -ne $newId })
+    [void](Invoke-Bcd (@('/set', '{fwbootmgr}', 'displayorder') + $newOrder))
+
+    # Read the result back.
+    $afterOrder = @(Get-BcdDisplayOrder (Invoke-Bcd @('/enum', '{fwbootmgr}', '/v') -LogOutput))
+    if (($afterOrder -join ',') -ne ($newOrder -join ',')) {
+        throw "The firmware boot order does not match the plan. Expected $($newOrder -join ','), found $($afterOrder -join ',')"
+    }
+    $afterText = Invoke-Bcd @('/enum', $newId, '/v') -LogOutput
+    if (-not (Test-BcdPropertyValue -Text $afterText -Value $Path)) {
+        throw "The boot entry does not point at the staged application. It says:`r`n$afterText"
+    }
+
+    return [pscustomobject]@{
+        Identifier  = $newId
+        Description = $Description
+        Device      = $entryDevices[0]
+        OrderBefore = @($beforeOrder)
+        OrderAfter  = @($afterOrder)
+    }
+}
+
+function Unregister-BcdBootEntry {
+    <#
+    .SYNOPSIS
+        Removes a boot entry and puts the firmware boot order back.
+
+    .PARAMETER Identifier
+        The identifier of the entry.
+
+    .PARAMETER OrderBefore
+        The order that was in place before the entry was registered.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Identifier,
+        [string[]]$OrderBefore = @()
+    )
+
+    $current = @(Get-BcdDisplayOrder (Invoke-Bcd @('/enum', '{fwbootmgr}', '/v') -LogOutput))
+    $restored = @($current | Where-Object { $_ -ne $Identifier })
+    $original = @()
+    if ($OrderBefore) {
+        $original = @($OrderBefore | Where-Object { $_ -ne $Identifier })
+    }
+    if ($original.Count -gt 0) {
+        [void](Invoke-Bcd (@('/set', '{fwbootmgr}', 'displayorder') + $original))
+    } elseif ($restored.Count -gt 0) {
+        [void](Invoke-Bcd (@('/set', '{fwbootmgr}', 'displayorder') + $restored))
+    }
+
+    # The entry itself is taken away as well, and not only put out of the
+    # order. It may be gone already, which is not a failure.
+    [void](Invoke-Bcd @('/delete', $Identifier) -IgnoreFailure)
+
+    return @(Get-BcdDisplayOrder (Invoke-Bcd @('/enum', '{fwbootmgr}', '/v') -LogOutput))
 }
