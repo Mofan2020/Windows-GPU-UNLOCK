@@ -1,0 +1,200 @@
+# Copyright (C) 2026 Windows GPU UNLOCK contributors. GPL-2.0-only.
+name: generic-windows
+
+on:
+  push:
+    branches: [main, 'feature/**']
+    paths:
+      - 'windows/**'
+      - 'deps/edk2/**'
+  pull_request:
+    paths:
+      - 'windows/**'
+      - 'deps/edk2/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  efi:
+    name: EFI application
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v5
+
+      # The EDK2 headers are vendored, so the build needs no network.
+      - name: Build the EFI application
+        shell: pwsh
+        run: |
+          $clang = (Get-Command clang.exe -ErrorAction SilentlyContinue).Source
+          if (-not $clang) {
+            $candidate = "$env:ProgramFiles\LLVM\bin\clang.exe"
+            if (Test-Path $candidate) { $clang = $candidate }
+          }
+          if (-not $clang) { throw 'clang.exe was not found' }
+
+          $lld = (Get-Command lld-link.exe -ErrorAction SilentlyContinue).Source
+          if (-not $lld) {
+            $candidate = "$env:ProgramFiles\LLVM\bin\lld-link.exe"
+            if (Test-Path $candidate) { $lld = $candidate }
+          }
+          if (-not $lld) { throw 'lld-link.exe was not found' }
+
+          & "$PSScriptRoot\windows\efi\build.ps1" -Clang $clang -LldLink $lld -Output "$PWD\build"
+          if ($LASTEXITCODE -ne 0) { throw 'The EFI build failed' }
+
+      - name: Verify the PE image
+        shell: pwsh
+        run: |
+          python internal-boot/unlock/verify_pe.py build/UNLOCK.EFI build/UNLOCK.map --output build/pe-verification.json
+          if ($LASTEXITCODE -ne 0) { throw 'The PE verification failed' }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: efi-application
+          path: |
+            build/UNLOCK.EFI
+            build/pe-verification.json
+
+  helper:
+    name: zstd helper
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install the cross compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mingw-w64
+
+      # The helper is built for Windows, because the tar.exe that comes with
+      # Windows is built on libarchive 3.3.2, which has no zstd support.
+      - name: Build the helper
+        run: |
+          chmod +x windows/installer/zstd/build.sh
+          windows/installer/zstd/build.sh x86_64-w64
+          file windows/installer/zstd/build/zstdcat.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zstd-helper
+          path: windows/installer/zstd/build/zstdcat.exe
+
+  tests:
+    name: host tests
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build and run the host tests
+        shell: pwsh
+        run: |
+          $clang = (Get-Command clang.exe -ErrorAction SilentlyContinue).Source
+          if (-not $clang) {
+            $candidate = "$env:ProgramFiles\LLVM\bin\clang.exe"
+            if (Test-Path $candidate) { $clang = $candidate }
+          }
+          if (-not $clang) { throw 'clang.exe was not found' }
+
+          & $clang -std=c11 -Wall -Wextra -Werror -O1 -DGU_HOST_TEST=1 `
+            -o build/test_generic_board.exe `
+            windows/tests/test_generic_board.c windows/efi/board.c windows/efi/checks.c
+          if ($LASTEXITCODE -ne 0) { throw 'The test build failed' }
+          & build/test_generic_board.exe
+          if ($LASTEXITCODE -ne 0) { throw 'The host tests failed' }
+
+      - name: Parse the PowerShell installer scripts
+        shell: pwsh
+        run: |
+          $failed = $false
+          Get-ChildItem windows/installer/*.ps1 | ForEach-Object {
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$errors)
+            if ($errors -and $errors.Count -gt 0) {
+              $failed = $true
+              Write-Host "FAIL $($_.Name)"
+              $errors | ForEach-Object { Write-Host "  $($_.Message) at line $($_.Extent.StartLineNumber)" }
+            } else {
+              Write-Host "OK   $($_.Name)"
+            }
+          }
+          if ($failed) { throw 'A PowerShell script did not parse' }
+
+      - name: Run the installer logic tests
+        shell: pwsh
+        run: |
+          & pwsh -NoProfile -File windows/tests/test-installer-logic.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'The installer logic tests failed' }
+
+  installer:
+    name: installer package
+    runs-on: windows-2022
+    needs: [efi, helper]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: efi-application
+          path: build
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: zstd-helper
+          path: build/helper
+
+      # The helper is exercised on Windows itself, so that a broken binary
+      # cannot reach a release.
+      - name: Test the helper
+        shell: pwsh
+        run: |
+          python -m pip install --quiet --disable-pip-version-check zstandard
+          if ($LASTEXITCODE -ne 0) { throw 'zstandard could not be installed' }
+
+          $expected = 'a1f259d4365ed4320c377ce26f5c8c56dcdc9a89e7b641bfd8eabfbbeac86654'
+          $digest = python windows/tests/make-zstd-fixture.py build/helper/fixture.tar.zst $expected
+          if ($LASTEXITCODE -ne 0) { throw 'The fixture could not be created' }
+
+          & build/helper/zstdcat.exe --version
+          if ($LASTEXITCODE -ne 0) { throw 'The helper did not start' }
+
+          & build/helper/zstdcat.exe --member 'test/member.bin' --output build/helper/member.bin
+          if ($LASTEXITCODE -ne 0) { throw 'The helper did not extract the member' }
+
+          $actual = (Get-FileHash build/helper/member.bin -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) {
+            throw "The extracted member does not match: expected $expected, got $actual"
+          }
+          if (Test-Path build/helper/test/other.bin) {
+            throw 'The helper kept reading after the member was complete'
+          }
+          Write-Host "OK   the helper extracted the member ($actual)"
+
+      - name: Package the installer
+        shell: pwsh
+        run: |
+          # makensis ships with the NSIS package on the runner image.
+          $makensis = (Get-Command makensis.exe -ErrorAction SilentlyContinue).Source
+          if (-not $makensis) {
+            $candidate = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
+            if (Test-Path $candidate) { $makensis = $candidate }
+          }
+          if (-not $makensis) { throw 'makensis.exe was not found' }
+
+          Push-Location windows/installer
+          try {
+            & $makensis "-DVERSION=$env:GITHUB_REF_NAME" "-DPAYLOAD=..\..\build" "-DHELPER=..\..\build\helper" WindowsGPUUnlock.nsi
+            if ($LASTEXITCODE -ne 0) { throw 'The installer packaging failed' }
+          } finally {
+            Pop-Location
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer
+          path: windows/installer/*.exe

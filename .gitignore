@@ -33,3 +33,12 @@ research/headless/registration.local.json
 research/headless/r2-registration.local.json
 research/headless/headless-registration.local.json
 internal-boot/deps/
+
+# The helper that reads the zstd compressed firmware package. The source is
+# tracked, the built binaries are not.
+windows/installer/zstdcat
+windows/installer/zstdcat.exe
+windows/installer/zstd/build/
+
+# macOS metadata
+.DS_Store

@@ -1,0 +1,73 @@
+// Copyright (C) 2026 Windows GPU UNLOCK contributors. GPL-2.0-only.
+/*
+ * The supported device and chip identifiers.
+ *
+ * Kept in one header so the EFI application, the host tests and the
+ * installer all read the same list. The device IDs are the ones the upstream
+ * Linux module accepts in kernel/gpu_unlock/main.c; the chip revisions are
+ * the GA10x silicon IDs observed in BAR0 offset 0.
+ */
+#pragma once
+
+/* GA102 (RTX 3090 / 3080 family) */
+#define GU_DEVICE_GA102_2200 0x2200u
+#define GU_DEVICE_GA102_3090TI 0x2203u
+#define GU_DEVICE_GA102_3090 0x2204u
+#define GU_DEVICE_GA102_3080TI 0x2205u
+#define GU_DEVICE_GA102_3080 0x2206u
+#define GU_DEVICE_GA102_3080_12G 0x2207u
+#define GU_DEVICE_GA102_3090TI_FE 0x2208u
+#define GU_DEVICE_GA102_3080_10G_OEM 0x220au
+#define GU_DEVICE_GA102_3080_12G_OEM 0x220du
+#define GU_DEVICE_GA102_3090TI_OEM 0x2216u
+#define GU_DEVICE_GA102_3090_OEM 0x222bu
+#define GU_DEVICE_GA102_3080_OEM 0x222fu
+
+/* GA104 (RTX 3070 / 3060 Ti family) */
+#define GU_DEVICE_GA104_3070TI_GEN 0x2480u
+#define GU_DEVICE_GA104_3070TI 0x2482u
+#define GU_DEVICE_GA104_3070_GEN 0x2483u
+#define GU_DEVICE_GA104_3070 0x2484u
+#define GU_DEVICE_GA104_3070TI_OEM 0x2486u
+#define GU_DEVICE_GA104_3080_GEN 0x2487u
+#define GU_DEVICE_GA104_3070_OEM 0x2488u
+#define GU_DEVICE_GA104_3060TI_GEN 0x2489u
+#define GU_DEVICE_GA104_3060TI 0x248au
+#define GU_DEVICE_GA104_3060TI_OEM 0x248cu
+#define GU_DEVICE_GA104_3070_GEN2 0x248du
+#define GU_DEVICE_GA104_3060_OEM 0x248eu
+#define GU_DEVICE_GA104_3060TI_OEM2 0x249cu
+#define GU_DEVICE_GA104_3060_GEN 0x249du
+#define GU_DEVICE_GA104_3060_OEM2 0x249fu
+#define GU_DEVICE_GA104_3060TI_OEM3 0x24a0u
+#define GU_DEVICE_GA104_3070_OEM2 0x24a4u
+#define GU_DEVICE_GA104_3060_OEM3 0x24acu
+#define GU_DEVICE_GA104_3060_OEM4 0x24adu
+#define GU_DEVICE_GA104_3070_OEM3 0x24afu
+#define GU_DEVICE_GA104_3060_OEM5 0x24bfu
+#define GU_DEVICE_GA104_3060TI_OEM4 0x24c0u
+#define GU_DEVICE_GA104_3060_OEM6 0x24c7u
+#define GU_DEVICE_GA104_3060TI_OEM5 0x24c8u
+#define GU_DEVICE_GA104_3060_OEM7 0x24c9u
+#define GU_DEVICE_GA104_3060TI_OEM6 0x24dcu
+#define GU_DEVICE_GA104_3070_OEM4 0x24ddu
+#define GU_DEVICE_GA104_3060_OEM8 0x24dfu
+#define GU_DEVICE_GA104_3060_OEM9 0x24e0u
+
+/* GA103 */
+#define GU_DEVICE_GA103_3080TI_OEM 0x2414u
+
+/* GA106 (RTX 3060 family) */
+#define GU_DEVICE_GA106_3060_GEN 0x2501u
+#define GU_DEVICE_GA106_3060_8G 0x2503u
+#define GU_DEVICE_GA106_3060_12G 0x2504u
+#define GU_DEVICE_GA106_3060TI_OEM 0x2505u
+#define GU_DEVICE_GA106_3060_OEM 0x2507u
+#define GU_DEVICE_GA106_3060_12G_OEM 0x2508u
+#define GU_DEVICE_GA106_3060_OEM2 0x2509u
+#define GU_DEVICE_GA106_3060_OEM3 0x252fu
+#define GU_DEVICE_GA106_3060TI_OEM2 0x2544u
+
+/* Chip revisions read from BAR0 offset 0. */
+#define GU_CHIP_GA102 0xb72000a1u
+#define GU_CHIP_GA104_GA106 0xb74000a1u

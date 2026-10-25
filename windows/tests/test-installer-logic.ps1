@@ -1,0 +1,269 @@
+# Copyright (C) 2026 Windows GPU UNLOCK contributors. GPL-2.0-only.
+<#
+.SYNOPSIS
+    Tests the decision logic of the installer scripts.
+
+.DESCRIPTION
+    The installer must refuse to run on hardware it cannot unlock, and it must
+    refuse to run on a machine that is not prepared for the transaction. Both
+    decisions are pure logic once the hardware and the system state are known,
+    so they are tested here with the Windows specific commands replaced by
+    stubs.
+
+    The test runs on any platform with PowerShell 7, so it can be part of the
+    continuous integration as well as the local check.
+#>
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+$root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+. (Join-Path $root 'windows/installer/Detect-Hardware.ps1')
+. (Join-Path $root 'windows/installer/Test-Preconditions.ps1')
+
+$script:Failures = 0
+$script:Checks = 0
+
+function Assert-True {
+    param([bool]$Condition, [string]$Message)
+    $script:Checks++
+    if (-not $Condition) {
+        $script:Failures++
+        Write-Host "  FAIL $Message" -ForegroundColor Red
+    }
+}
+
+function Assert-Equal {
+    param($Expected, $Actual, [string]$Message)
+    $script:Checks++
+    if ($Expected -ne $Actual) {
+        $script:Failures++
+        Write-Host "  FAIL $Message" -ForegroundColor Red
+        Write-Host "       expected: $Expected"
+        Write-Host "       actual:   $Actual"
+    }
+}
+
+function Assert-Contains {
+    param([string]$Haystack, [string]$Needle, [string]$Message)
+    $script:Checks++
+    if ($null -eq $Haystack -or $Haystack -notlike "*$Needle*") {
+        $script:Failures++
+        Write-Host "  FAIL $Message" -ForegroundColor Red
+        Write-Host "       expected to contain: $Needle"
+        Write-Host "       actual:              $Haystack"
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Stubs for the Windows specific commands.
+# ---------------------------------------------------------------------------
+
+# The fake adapters the next test case wants to present.
+$script:FakeVideoControllers = @()
+
+function Get-CimInstance {
+    param(
+        [string]$ClassName,
+        [string]$Namespace,
+        [Parameter(ValueFromPipeline = $true)]$InputObject
+    )
+    if ($ClassName -eq 'Win32_VideoController') {
+        return $script:FakeVideoControllers
+    }
+    throw "Get-CimInstance was called for an unexpected class: $ClassName"
+}
+
+# The fake system state the next test case wants to present.
+$script:FakeSecureBoot = $null
+$script:FakeBitLocker = $null
+$script:FakeEsp = $null
+$script:FakeHiberboot = $null
+
+# The EFI system partition is represented by a real directory, so that the
+# path checks behave the way they do on Windows.
+$script:FakeEspRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('gpu-unlock-esp-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path (Join-Path $script:FakeEspRoot 'EFI\Microsoft\Boot') -Force | Out-Null
+Set-Content -LiteralPath (Join-Path $script:FakeEspRoot 'EFI\Microsoft\Boot\bootmgfw.efi') -Value 'stub'
+$script:FakeEspLetter = 'S'
+
+function Get-ItemProperty {
+    param([string]$Path, [string]$Name)
+    if ($Path -like '*SecureBoot*') {
+        if ($null -eq $script:FakeSecureBoot) { throw 'The key does not exist' }
+        return [pscustomobject]@{ UEFISecureBootEnabled = $script:FakeSecureBoot }
+    }
+    if ($Path -like '*Session Manager\Power*') {
+        if ($null -eq $script:FakeHiberboot) { throw 'The key does not exist' }
+        return [pscustomobject]@{ HiberbootEnabled = $script:FakeHiberboot }
+    }
+    throw "Get-ItemProperty was called for an unexpected path: $Path"
+}
+
+function Get-BitLockerVolume {
+    param([string]$MountPoint)
+    if ($null -eq $script:FakeBitLocker) { throw 'The cmdlet is not available' }
+    return [pscustomobject]@{ ProtectionStatus = $script:FakeBitLocker }
+}
+
+function Get-Partition {
+    if ($null -eq $script:FakeEsp) { return @() }
+    return @([pscustomobject]@{
+        IsSystem       = $true
+        GptType        = '{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}'
+        Guid           = '11111111-2222-3333-4444-555555555555'
+        Size           = [uint64]268435456
+        DiskNumber     = 0
+        PartitionNumber = 1
+    })
+}
+
+function Get-Volume {
+    param([Parameter(ValueFromPipeline = $true)]$InputObject)
+    if ($null -eq $script:FakeEsp) { return $null }
+    return [pscustomobject]@{
+        FileSystem  = 'FAT32'
+        DriveLetter = $script:FakeEspLetter
+        Path        = $script:FakeEspRoot
+        Size        = [uint64]268435456
+    }
+}
+
+function Set-Partition {
+    param([int]$DiskNumber, [int]$PartitionNumber, [string]$NewDriveLetter)
+    $script:FakeEspLetter = $NewDriveLetter
+}
+
+function Remove-PartitionAccessPath {
+    param([int]$DiskNumber, [int]$PartitionNumber, [string]$AccessPath)
+    $script:FakeEspLetter = ''
+}
+
+# ---------------------------------------------------------------------------
+# Hardware detection.
+# ---------------------------------------------------------------------------
+
+function New-FakeAdapter {
+    param([string]$Name, [string]$Vendor, [string]$Device)
+    return [pscustomobject]@{
+        Name           = $Name
+        PNPDeviceID    = "PCI\VEN_${Vendor}&DEV_${Device}&SUBSYS_12345678"
+        DriverVersion  = '31.0.15.3623'
+        AdapterRAM     = 8589934592
+        Status         = 'OK'
+    }
+}
+
+Write-Host 'Hardware detection'
+
+$script:FakeVideoControllers = @()
+$result = Test-UnlockTarget
+Assert-True (-not $result.Supported) 'A machine without any adapter is refused'
+Assert-Contains $result.Reason 'No display adapter' 'The reason mentions the missing adapter'
+
+$script:FakeVideoControllers = @(New-FakeAdapter -Name 'AMD Radeon Graphics' -Vendor '1002' -Device '164E')
+$result = Test-UnlockTarget
+Assert-True (-not $result.Supported) 'A machine without an NVIDIA card is refused'
+Assert-Contains $result.Reason 'No NVIDIA display adapter' 'The reason mentions that no NVIDIA card was found'
+Assert-Contains $result.Reason 'AMD Radeon Graphics' 'The reason names the adapter that was found'
+
+$script:FakeVideoControllers = @(New-FakeAdapter -Name 'NVIDIA GeForce RTX 4090' -Vendor '10DE' -Device '2684')
+$result = Test-UnlockTarget
+Assert-True (-not $result.Supported) 'An NVIDIA card outside GA10x is refused'
+Assert-Contains $result.Reason 'not a supported GA10x part' 'The reason explains that the part is not supported'
+
+$script:FakeVideoControllers = @(New-FakeAdapter -Name 'NVIDIA GeForce RTX 3060' -Vendor '10DE' -Device '2503')
+$result = Test-UnlockTarget
+Assert-True $result.Supported 'An RTX 3060 8GB is accepted'
+Assert-Equal 'GA106  RTX 3060 8GB' $result.Target.DeviceName 'The target carries the friendly name'
+Assert-Equal 0x2503 $result.Target.DeviceId 'The target carries the device ID'
+
+$script:FakeVideoControllers = @(New-FakeAdapter -Name 'NVIDIA GeForce RTX 3060' -Vendor '10DE' -Device '2504')
+$result = Test-UnlockTarget
+Assert-True $result.Supported 'An RTX 3060 12GB is accepted'
+Assert-Equal 'GA106  RTX 3060 12GB' $result.Target.DeviceName 'The target carries the friendly name'
+
+$script:FakeVideoControllers = @(
+    New-FakeAdapter -Name 'Intel UHD Graphics' -Vendor '8086' -Device '9A49'
+    New-FakeAdapter -Name 'NVIDIA GeForce RTX 3070 Ti' -Vendor '10DE' -Device '2482'
+)
+$result = Test-UnlockTarget
+Assert-True $result.Supported 'An integrated GPU next to a supported card is accepted'
+Assert-Equal 2 $result.Adapters.Count 'Both adapters are listed'
+
+$script:FakeVideoControllers = @(
+    New-FakeAdapter -Name 'NVIDIA GeForce RTX 3060' -Vendor '10DE' -Device '2503'
+    New-FakeAdapter -Name 'NVIDIA GeForce RTX 3080' -Vendor '10DE' -Device '2206'
+)
+$result = Test-UnlockTarget
+Assert-True (-not $result.Supported) 'Two supported cards are refused'
+Assert-Contains $result.Reason 'More than one supported NVIDIA card' 'The reason explains the duplicate'
+
+# ---------------------------------------------------------------------------
+# System preconditions.
+# ---------------------------------------------------------------------------
+
+Write-Host 'System preconditions'
+
+$script:FakeSecureBoot = $true
+$script:FakeBitLocker = 'Off'
+$script:FakeEsp = $true
+$script:FakeHiberboot = 0
+$result = Test-InstallPreconditions
+Assert-True (-not $result.CanInstall) 'Secure Boot on blocks the installation'
+Assert-Contains ($result.Blocking -join ' ') 'Secure Boot is enabled' 'The blocking reason names Secure Boot'
+
+$script:FakeSecureBoot = $false
+$script:FakeBitLocker = 'On'
+$result = Test-InstallPreconditions
+Assert-True (-not $result.CanInstall) 'BitLocker blocks the installation'
+Assert-Contains ($result.Blocking -join ' ') 'BitLocker' 'The blocking reason names BitLocker'
+
+$script:FakeBitLocker = 'Off'
+$script:FakeEsp = $null
+$result = Test-InstallPreconditions
+Assert-True (-not $result.CanInstall) 'A missing EFI system partition blocks the installation'
+Assert-Contains ($result.Blocking -join ' ') 'EFI system partition' 'The blocking reason names the partition'
+
+$script:FakeEsp = $true
+$script:FakeHiberboot = 1
+$result = Test-InstallPreconditions
+Assert-True $result.CanInstall 'A prepared machine is allowed'
+Assert-Contains ($result.Warnings -join ' ') 'Fast Startup' 'Fast Startup is reported as a warning'
+Assert-True $result.FastStartup 'The Fast Startup flag is reported'
+
+$script:FakeHiberboot = 0
+$result = Test-InstallPreconditions
+Assert-True $result.CanInstall 'A prepared machine is still allowed'
+Assert-True (-not $result.FastStartup) 'The Fast Startup flag is cleared'
+
+Write-Host 'The EFI system partition'
+
+$script:FakeEsp = $true
+$script:FakeEspLetter = 'S'
+$esp = Get-EfiSystemPartition
+Assert-True ($null -ne $esp) 'The EFI system partition is found'
+Assert-Equal 'S' $esp.DriveLetter 'The partition keeps the drive letter it has'
+Assert-True (Test-Path -LiteralPath (Join-Path $esp.Path 'EFI\Microsoft\Boot\bootmgfw.efi')) 'The partition is the one with the Windows Boot Manager'
+
+$letter = Enable-EspDriveLetter -Esp $esp
+Assert-Equal 'S' $letter 'A partition that has a letter keeps it'
+Assert-Equal 'S' $script:FakeEspLetter 'No other letter was assigned'
+
+$script:FakeEspLetter = ''
+$esp = Get-EfiSystemPartition
+Assert-True ($null -ne $esp) 'A hidden EFI system partition is found as well'
+Assert-Equal '' $esp.DriveLetter 'The hidden partition has no drive letter'
+$letter = Enable-EspDriveLetter -Esp $esp
+Assert-True (-not [string]::IsNullOrEmpty($letter)) 'A drive letter is assigned to the hidden partition'
+Assert-Equal $letter $script:FakeEspLetter 'The assigned drive letter was applied'
+Remove-EspDriveLetter -Esp $esp -Letter $letter
+Assert-Equal '' $script:FakeEspLetter 'The assigned drive letter is removed again'
+
+Write-Host ''
+if ($script:Failures -eq 0) {
+    Write-Host "all checks passed ($script:Checks)" -ForegroundColor Green
+    exit 0
+}
+Write-Host "$script:Failures of $script:Checks checks failed" -ForegroundColor Red
+exit 1
