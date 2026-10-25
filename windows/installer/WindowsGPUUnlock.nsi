@@ -65,7 +65,7 @@ VIAddVersionKey "ProductVersion" "${PRODUCT_VERSION}"
 ; The notes are on the welcome page, so that they are read before anything
 ; is done. The long version is in the log and in the documentation.
 !define MUI_WELCOMEPAGE_TITLE "${PRODUCT} ${VERSION}"
-!define MUI_WELCOMEPAGE_TEXT "This installer unlocks the FP16 and BF16 tensor instruction rate on NVIDIA GeForce RTX 30-series cards (GA102, GA103, GA104, GA106 - the RTX 3090, 3080, 3070 and 3060 families).`r`n`r`nBEFORE YOU CONTINUE, READ THIS:`r`n`r`n1. Secure Boot must be OFF in your BIOS. The application is not signed, so a firmware that enforces Secure Boot will refuse to load it.`r`n`r`n2. Windows Fast Startup must be OFF, so that a shutdown really powers the card down. Run: powercfg /h off`r`n`r`n3. If BitLocker protects your Windows volume, suspend it first. Run: manage-bde -protectors -disable C:`r`n`r`n4. The card that is unlocked must NOT drive the display. Use a machine with an integrated GPU and keep the screen plugged into it.`r`n`r`n5. The installer is not signed, so Windows may warn about an unknown publisher. Antivirus software may also block the application. If it says 'Error opening file for writing', add this folder to the trust list of your antivirus software, or install into another folder.`r`n`r`n6. About 100 MB is downloaded from NVIDIA and the CachyOS archive. The NVIDIA firmware files are not part of this package, because NVIDIA's licence does not allow it; they are generated on this machine and checked against their SHA-256.`r`n`r`nThis is experimental. It writes to the card's firmware and to its registers. Keep a bootable USB handy, and do not use it on a machine you depend on for work."
+!define MUI_WELCOMEPAGE_TEXT "This installer unlocks the FP16 and BF16 tensor instruction rate on NVIDIA GeForce RTX 30-series cards (GA102, GA103, GA104, GA106 - the RTX 3090, 3080, 3070 and 3060 families).$\r$\n$\r$\nBEFORE YOU CONTINUE, READ THIS:$\r$\n$\r$\n1. Secure Boot must be OFF in your BIOS. The application is not signed, so a firmware that enforces Secure Boot will refuse to load it.$\r$\n$\r$\n2. Windows Fast Startup must be OFF, so that a shutdown really powers the card down. Run: powercfg /h off$\r$\n$\r$\n3. If BitLocker protects your Windows volume, suspend it first. Run: manage-bde -protectors -disable C:$\r$\n$\r$\n4. The card that is unlocked must NOT drive the display. Use a machine with an integrated GPU and keep the screen plugged into it.$\r$\n$\r$\n5. The installer is not signed, so Windows may warn about an unknown publisher. Antivirus software may also block the application. If it says 'Error opening file for writing', add this folder to the trust list of your antivirus software, or install into another folder.$\r$\n$\r$\n6. About 100 MB is downloaded from NVIDIA and the CachyOS archive. The NVIDIA firmware files are not part of this package, because NVIDIA's licence does not allow it; they are generated on this machine and checked against their SHA-256.$\r$\n$\r$\nThis is experimental. It writes to the card's firmware and to its registers. Keep a bootable USB handy, and do not use it on a machine you depend on for work."
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
@@ -95,8 +95,7 @@ Function .onInit
   ClearErrors
   FileOpen $2 "$INSTDIR\${LOGFILE}" w
   IfErrors log_open_failed
-    FileWrite $2 "The installer started on this machine."
-    FileWrite $2 ""
+    FileWrite $2 "The installer started on this machine.$\r$\n"
   FileClose $2
   Goto log_opened
 
@@ -109,10 +108,15 @@ Section "Install"
 
   ; Say what is being unpacked, so that the log says where the installer
   ; stopped if it does.
+  ; The file is opened in append mode and then put at its end. FileOpen with
+  ; "a" opens the file without truncating it, but it leaves the position at
+  ; the start, so without the seek the line would be written over the one
+  ; that is already there.
   ClearErrors
   FileOpen $2 "$INSTDIR\${LOGFILE}" a
   IfErrors progress_before_done
-    FileWrite $2 "Unpacking the files.`r`n"
+    FileSeek $2 0 END
+    FileWrite $2 "Unpacking the files.$\r$\n"
   FileClose $2
   progress_before_done:
 
@@ -139,7 +143,8 @@ Section "Install"
   ClearErrors
   FileOpen $2 "$INSTDIR\${LOGFILE}" a
   IfErrors progress_after_done
-    FileWrite $2 "The files are unpacked.`r`n"
+    FileSeek $2 0 END
+    FileWrite $2 "The files are unpacked.$\r$\n"
   FileClose $2
   progress_after_done:
 
@@ -169,7 +174,7 @@ Section "Install"
   StrCpy $0 "$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe"
   IfFileExists $0 powershell_found
 
-  MessageBox MB_ICONSTOP "Windows PowerShell was not found on this machine, so the installer cannot run.`r`n`r`nThe log file is here: $INSTDIR\${LOGFILE}" /SD IDOK
+  MessageBox MB_ICONSTOP "Windows PowerShell was not found on this machine, so the installer cannot run.$\r$\n$\r$\nThe log file is here: $INSTDIR\${LOGFILE}" /SD IDOK
   Abort
 
   powershell_found:
@@ -203,11 +208,11 @@ Section "Install"
   no_log_window:
 
   ${If} $1 != 0
-    MessageBox MB_ICONSTOP "The installation did not finish. The log has been opened for you, and it is here: $INSTDIR\${LOGFILE}`r`n`r`nIf the log says that the EFI system partition was already written to, run the uninstaller afterwards to clean it up." /SD IDOK
+    MessageBox MB_ICONSTOP "The installation did not finish. The log has been opened for you, and it is here: $INSTDIR\${LOGFILE}$\r$\n$\r$\nIf the log says that the EFI system partition was already written to, run the uninstaller afterwards to clean it up." /SD IDOK
     Abort
   ${EndIf}
 
-  MessageBox MB_OK "Done. Reboot to try it.`r`n`r`nThe log has been opened for you, and it is here: $INSTDIR\${LOGFILE}" /SD IDOK
+  MessageBox MB_OK "Done. Reboot to try it.$\r$\n$\r$\nThe log has been opened for you, and it is here: $INSTDIR\${LOGFILE}" /SD IDOK
 SectionEnd
 
 Section "Uninstall"

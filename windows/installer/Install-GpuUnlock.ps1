@@ -122,7 +122,7 @@ function Install-GpuUnlock {
     if (-not (Test-Path -LiteralPath $application)) {
         throw "The EFI application was not found: $application"
     }
-    $applicationHash = (Get-FileHash -LiteralPath $application -Algorithm SHA256).Hash.ToLowerInvariant()
+    $applicationHash = Get-Sha256 -Path $application
     Write-Ok ("UNLOCK.EFI  {0} bytes  sha256 {1}" -f (Get-Item -LiteralPath $application).Length, $applicationHash)
 
     $expected = @{
@@ -137,7 +137,7 @@ function Install-GpuUnlock {
         if (-not (Test-Path -LiteralPath $path)) {
             throw "A firmware asset is missing: $name"
         }
-        $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+        $actual = Get-Sha256 -Path $path
         if ($actual -ne $expected[$name]) {
             throw "A firmware asset does not match its pinned SHA-256: $name`n  expected $($expected[$name])`n  actual   $actual"
         }
@@ -161,12 +161,12 @@ function Install-GpuUnlock {
     Write-Ok ("Staged in {0}" -f $stagingRoot)
 
     # Verify what landed on the partition, not what we intended to write.
-    $stagedHash = (Get-FileHash -LiteralPath (Join-Path $stagingRoot $script:EfiApplicationName) -Algorithm SHA256).Hash.ToLowerInvariant()
+    $stagedHash = Get-Sha256 -Path (Join-Path $stagingRoot $script:EfiApplicationName)
     if ($stagedHash -ne $applicationHash) {
         throw 'The staged EFI application does not match the one that was verified'
     }
     foreach ($name in $expected.Keys) {
-        $actual = (Get-FileHash -LiteralPath (Join-Path $stagingAssets $name) -Algorithm SHA256).Hash.ToLowerInvariant()
+        $actual = Get-Sha256 -Path (Join-Path $stagingAssets $name)
         if ($actual -ne $expected[$name]) {
             throw "The staged asset does not match its pinned SHA-256: $name"
         }

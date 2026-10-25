@@ -324,6 +324,35 @@ Assert-Contains $source 'WGPU-RESULT' 'the entry point writes a result marker'
 Assert-Contains $source 'Start-Transcript' 'the entry point writes a log file'
 Assert-Contains $source 'Stop-Transcript' 'the entry point closes the log file'
 
+Write-Host 'The log that the installer writes'
+
+# The installer writes the first lines of the log itself, and the script
+# takes the file over from there. Two things went wrong with that before.
+# The line endings were written as text, so the welcome page and the log
+# showed "`r`n" instead of a line break. And the append mode of FileOpen
+# opens the file without truncating it but leaves the position at the
+# start, so every line was written over the one before it.
+$nsi = Get-Content (Join-Path $root 'windows/installer/WindowsGPUUnlock.nsi') -Raw
+Assert-True (-not $nsi.Contains('`r`n')) 'the installer script has no backtick line endings'
+Assert-True ($nsi.Contains('$\r$\n')) 'the installer script writes real line endings'
+
+$openings = [regex]::Matches($nsi, 'FileOpen \$2 "\$INSTDIR\\\$\{LOGFILE\}" a')
+Assert-Equal 2 $openings.Count 'the log is opened in append mode twice'
+foreach ($opening in $openings) {
+    $after = $nsi.Substring($opening.Index + $opening.Length)
+    $write = $after.IndexOf('FileWrite')
+    Assert-True ($write -ge 0) 'there is a write after every append'
+    if ($write -ge 0) {
+        $between = $after.Substring(0, $write)
+        Assert-Contains $between 'FileSeek $2 0 END' 'the append is put at the end of the file before it is written to'
+    }
+}
+
+# One writer for the file. Appending the transcript to what the installer
+# wrote leaves two encodings in one file, and half of it cannot be read.
+Assert-True ($source -notmatch 'Start-Transcript[^\r\n]*-Append') 'the entry point does not append to the log'
+Assert-Contains $source 'Start-Transcript -Path $LogPath -Force' 'the entry point takes the log file over'
+
 Write-Host 'The payload that the installer carries'
 
 # The EFI application and the helper are carried as base64 text, because
@@ -359,6 +388,26 @@ try {
         $refused = $true
     }
     Assert-True $refused 'an unpacked file with the wrong digest is refused'
+} finally {
+    if (Test-Path -LiteralPath $scratch) {
+        Remove-Item -LiteralPath $scratch -Recurse -Force
+    }
+}
+
+Write-Host 'The digest function'
+
+# The installer has to be able to compute a digest on every Windows it runs
+# on. The Get-FileHash cmdlet is not in every Windows PowerShell, and a
+# machine that does not have it cannot verify anything.
+Assert-True ($null -ne (Get-Command Get-Sha256 -ErrorAction SilentlyContinue)) 'the digest function exists'
+
+$scratch = Join-Path ([System.IO.Path]::GetTempPath()) ('wgpu-digest-' + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $scratch -Force | Out-Null
+try {
+    $file = Join-Path $scratch 'bytes.bin'
+    [System.IO.File]::WriteAllBytes($file, [byte[]](0..255))
+    $digest = Get-Sha256 -Path $file
+    Assert-Equal '40aff2e9d2d8922e47afd4648e6967497158785fbd1da870e7110266bf944880' $digest 'the digest of the 256 bytes is right'
 } finally {
     if (Test-Path -LiteralPath $scratch) {
         Remove-Item -LiteralPath $scratch -Recurse -Force

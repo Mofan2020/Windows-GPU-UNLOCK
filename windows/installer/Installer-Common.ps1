@@ -32,6 +32,33 @@ function Write-Fail {
     Write-Host "    $Message" -ForegroundColor Red
 }
 
+function Get-Sha256 {
+    <#
+    .SYNOPSIS
+        The SHA-256 of a file, in lower case hex.
+
+    .DESCRIPTION
+        This is written with the .NET cryptography classes on purpose. The
+        Get-FileHash cmdlet is not in every Windows PowerShell that the
+        installer can run on, and the installer cannot verify anything
+        without it.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+
+    $algorithm = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [System.IO.File]::OpenRead($Path)
+        try {
+            $hash = $algorithm.ComputeHash($stream)
+        } finally {
+            $stream.Dispose()
+        }
+    } finally {
+        $algorithm.Dispose()
+    }
+    return ([System.BitConverter]::ToString($hash)).Replace('-', '').ToLowerInvariant()
+}
+
 function Expand-EmbeddedPayload {
     <#
     .SYNOPSIS
@@ -63,7 +90,7 @@ function Expand-EmbeddedPayload {
     }
     [System.IO.File]::WriteAllBytes($TargetPath, $bytes)
 
-    $actual = (Get-FileHash -LiteralPath $TargetPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $actual = Get-Sha256 -Path $TargetPath
     if ($actual -ne $ExpectedSha256.ToLowerInvariant()) {
         throw "The unpacked file does not match: expected $ExpectedSha256, got $actual"
     }

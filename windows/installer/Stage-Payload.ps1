@@ -69,11 +69,30 @@ function Write-Base64File {
 Write-Base64File -Source $Application -Target (Join-Path $OutputDirectory 'unlock-payload.txt')
 Write-Base64File -Source $Helper -Target (Join-Path $HelperOutputDirectory 'helper-payload.txt')
 
+# The digest is computed with the .NET classes, so that the script does not
+# depend on a cmdlet that is missing on some Windows installations.
+function Get-Sha256 {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $algorithm = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [System.IO.File]::OpenRead($Path)
+        try {
+            $hash = $algorithm.ComputeHash($stream)
+        } finally {
+            $stream.Dispose()
+        }
+    } finally {
+        $algorithm.Dispose()
+    }
+    return ([System.BitConverter]::ToString($hash)).Replace('-', '').ToLowerInvariant()
+}
+
 # The parentheses matter: in PowerShell the comma binds tighter than the
 # plus, so without them this becomes one string with the two entries in it.
 $manifest = @(
-    ('application=' + (Get-FileHash -LiteralPath $Application -Algorithm SHA256).Hash.ToLowerInvariant())
-    ('helper=' + (Get-FileHash -LiteralPath $Helper -Algorithm SHA256).Hash.ToLowerInvariant())
+    ('application=' + (Get-Sha256 -Path $Application))
+    ('helper=' + (Get-Sha256 -Path $Helper))
 )
 [System.IO.File]::WriteAllLines((Join-Path $OutputDirectory 'payload-manifest.txt'), $manifest)
 Write-Host ("  payload-manifest.txt  {0}" -f (Split-Path -Leaf $OutputDirectory))

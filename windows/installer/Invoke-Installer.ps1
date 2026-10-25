@@ -50,27 +50,36 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 if (-not $LogPath) {
-    $LogPath = Join-Path $env:TEMP 'WindowsGPUUnlock-install.log'
+    $LogPath = Join-Path ([System.IO.Path]::GetTempPath()) 'WindowsGPUUnlock-install.log'
 }
 
 # The log is written first, so that a failure while loading the other
-# scripts is in there as well. The file is appended to, because the
-# packaged installer writes the first line itself, before it starts this
-# script.
+# scripts is in there as well.
+#
+# The packaged installer writes the first lines itself, before it starts
+# this script, so that there is a record on the disk even if this script
+# never gets to run. Those lines are read here and put back into the
+# transcript, and the transcript owns the file from then on. Appending to a
+# file that the installer wrote would leave two different encodings in it,
+# because the installer writes single bytes and the transcript does not.
 $transcript = $null
+$preamble = $null
 try {
     $logDirectory = Split-Path -Parent $LogPath
     if ($logDirectory -and -not (Test-Path -LiteralPath $logDirectory)) {
         New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
     }
     if (Test-Path -LiteralPath $LogPath) {
-        Start-Transcript -Path $LogPath -Append | Out-Null
-    } else {
-        Start-Transcript -Path $LogPath -Force | Out-Null
+        $preamble = Get-Content -LiteralPath $LogPath -Raw -ErrorAction SilentlyContinue
     }
+    Start-Transcript -Path $LogPath -Force | Out-Null
     $transcript = $true
 } catch {
     Write-Host "The log file could not be opened: $($_.Exception.Message)"
+}
+if ($transcript -and $preamble) {
+    Write-Host $preamble.TrimEnd()
+    Write-Host ''
 }
 
 function Test-Administrator {
@@ -286,7 +295,7 @@ try {
     # EFI application, and the installer would then not even start.
     $payloadRoot = $PayloadDirectory
     if (-not $payloadRoot) {
-        $payloadRoot = Join-Path $env:TEMP 'WindowsGPUUnlock'
+        $payloadRoot = Join-Path ([System.IO.Path]::GetTempPath()) 'WindowsGPUUnlock'
     }
     Write-Host ''
     Write-Host 'Unpacking the application and the helper'
@@ -351,7 +360,7 @@ try {
             # The firmware assets are produced here, on this machine, from
             # pinned upstream inputs. They are never downloaded as a
             # ready-made blob, because NVIDIA's licence does not permit that.
-            $workRoot = Join-Path $env:TEMP 'WindowsGPUUnlock-assets'
+            $workRoot = Join-Path ([System.IO.Path]::GetTempPath()) 'WindowsGPUUnlock-assets'
             $assetRoot = Join-Path $workRoot 'assets'
 
             Write-Heading 'Preparing the firmware assets'
@@ -374,7 +383,7 @@ try {
             if ($exitCode -eq 0) {
                 $payload = $PayloadDirectory
                 if (-not $payload) {
-                    $payload = Join-Path $env:TEMP 'WindowsGPUUnlock'
+                    $payload = Join-Path ([System.IO.Path]::GetTempPath()) 'WindowsGPUUnlock'
                 }
 
                 & (Join-Path $PSScriptRoot 'Install-GpuUnlock.ps1') `

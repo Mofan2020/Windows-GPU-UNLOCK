@@ -37,6 +37,9 @@
 
 Set-StrictMode -Version Latest
 
+# The shared helpers, among them the digest function.
+. (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'Installer-Common.ps1')
+
 # The directory this file lives in. It is captured while the file is being
 # loaded, because the automatic variables are not available once a function
 # of this script is called from somewhere else.
@@ -120,7 +123,7 @@ $script:V67Patched = [ordered]@{
 
 function Get-FileSha256 {
     param([Parameter(Mandatory)][string]$Path)
-    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    return Get-Sha256 -Path $Path
 }
 
 <#
@@ -204,7 +207,7 @@ function Get-ZstdHelper {
         layout had it next to the scripts, and that is still looked at.
     #>
     $candidates = @(
-        (Join-Path $env:TEMP 'WindowsGPUUnlock\zstdcat.exe'),
+        (Join-Path ([System.IO.Path]::GetTempPath()) 'WindowsGPUUnlock\zstdcat.exe'),
         (Join-Path $script:ScriptRoot 'zstdcat.exe'),
         (Join-Path $script:ScriptRoot 'zstdcat')
     )

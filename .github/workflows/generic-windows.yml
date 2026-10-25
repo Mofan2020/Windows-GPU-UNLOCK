@@ -360,12 +360,26 @@ jobs:
         shell: pwsh
         run: |
           $target = "$env:RUNNER_TEMP\wgpu"
-          $text = Get-Content (Join-Path $target 'install.log') -Raw
+          $logPath = Join-Path $target 'install.log'
+          $text = Get-Content $logPath -Raw
           $exitCode = [int](Get-Content "$env:RUNNER_TEMP\wgpu-exit.txt")
 
           foreach ($needle in @('Windows GPU UNLOCK', 'System checks', 'Secure Boot', 'WGPU-RESULT:')) {
             if ($text -notlike "*$needle*") { throw "the log does not mention: $needle" }
           }
+
+          # The lines that the installer itself wrote have to be in there.
+          # They used to be written over each other, because FileOpen in
+          # append mode leaves the position at the start of the file.
+          foreach ($needle in @('The installer started on this machine.', 'Unpacking the files.', 'The files are unpacked.')) {
+            if ($text -notlike "*$needle*") { throw "the log does not mention: $needle" }
+          }
+
+          # One writer, one encoding. The installer writes single bytes and
+          # the transcript does not, so a file with both in it is not readable.
+          $bytes = [System.IO.File]::ReadAllBytes($logPath)
+          if ($bytes -contains 0) { throw 'the log has null bytes in it, so more than one writer wrote to it' }
+          Write-Host 'OK   the log is a single piece of text'
 
           # The application is carried as text and unpacked by the script.
           # The file that comes out has to be the one that was packed.
