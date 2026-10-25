@@ -65,6 +65,16 @@ $script:Manifest = @{
         Sha256  = 'e17e7c92eeffa178b0fe1f40eb17a47095f8fc3ce4a77bf115cf5bd5a4df86e9'
         File    = 'nvidia-utils-610.43.03-1-x86_64_v3.pkg.tar.zst'
     }
+    # The two generated sources are also in the upstream repository, and the
+    # contents API serves them as text. That way they can be fetched without
+    # an archive that has to be unpacked, which is the part of the pipeline
+    # that the tar of Windows does not do the way the one on a Linux machine
+    # does. The tag is the one of the release that the archive holds too, and
+    # every file is checked against its own pinned digest either way.
+    SourceMirror = @{
+        Repository = 'NVIDIA/open-gpu-kernel-modules'
+        Tag        = '610.43.03'
+    }
 }
 
 # Pinned source files inside the source archive, with the SHA-256 of the file
@@ -137,6 +147,8 @@ function Get-FileSha256 {
     default of the older .NET Framework stops at TLS 1.2.
 #>
 function New-HttpClient {
+    param([int]$TimeoutSeconds = 3600)
+
     try {
         Add-Type -AssemblyName System.Net.Http -ErrorAction SilentlyContinue
     } catch {
@@ -152,7 +164,7 @@ function New-HttpClient {
     }
 
     $client = New-Object System.Net.Http.HttpClient($handler)
-    $client.Timeout = [TimeSpan]::FromMinutes(60)
+    $client.Timeout = [TimeSpan]::FromSeconds($TimeoutSeconds)
     return $client
 }
 
@@ -194,6 +206,121 @@ function Assert-HttpsUrl {
 
     if (-not $Url.StartsWith('https://')) {
         throw "Refusing a non-HTTPS download: $Url"
+    }
+}
+
+function Get-GeneratedSourceFromApi {
+    <#
+    .SYNOPSIS
+        Fetches one of the generated sources from the upstream repository.
+
+    .DESCRIPTION
+        The contents API of the repository serves a file as text, so the file
+        can be taken without an archive that has to be unpacked. The digest is
+        the pinned one, so it does not matter who answered.
+
+        The API is asked for a short time only. A network that cannot reach
+        it should not hold the installation up, because there is another way
+        to the same files.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Destination,
+        [Parameter(Mandatory)][string]$Sha256
+    )
+
+    $url = 'https://api.github.com/repos/{0}/contents/{1}?ref={2}' -f `
+        $script:Manifest.SourceMirror.Repository, $Path, $script:Manifest.SourceMirror.Tag
+    Assert-HttpsUrl $url
+
+    $client = New-HttpClient -TimeoutSeconds 60
+    try {
+        $request = New-Object System.Net.Http.HttpRequestMessage `
+            ([System.Net.Http.HttpMethod]::Get, $url)
+        $request.Headers.UserAgent.ParseAdd('WindowsGPUUnlock-installer')
+        $response = $client.SendAsync($request).GetAwaiter().GetResult()
+        try {
+            if (-not $response.IsSuccessStatusCode) {
+                throw "the server answered $([int]$response.StatusCode) $($response.ReasonPhrase)"
+            }
+            $body = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+        } finally {
+            $response.Dispose()
+        }
+    } finally {
+        $client.Dispose()
+    }
+
+    $answer = $body | ConvertFrom-Json
+    if ($answer.encoding -ne 'base64' -or -not $answer.content) {
+        throw "the answer did not carry the file (encoding $($answer.encoding))"
+    }
+
+    $bytes = [Convert]::FromBase64String(($answer.content -replace '\s', ''))
+    [System.IO.File]::WriteAllBytes($Destination, $bytes)
+
+    $actual = Get-FileSha256 $Destination
+    if ($actual -ne $Sha256) {
+        throw "SHA-256 mismatch`n  expected $Sha256`n  actual   $actual"
+    }
+    return $Destination
+}
+
+function Quote-NativeArgument {
+    <#
+    .SYNOPSIS
+        Puts one argument in the form that a native program on Windows reads.
+    #>
+    param([Parameter(Mandatory)][string]$Value)
+
+    if ($Value -notmatch '[\s"]') {
+        return $Value
+    }
+    $escaped = $Value -replace '(\\*)"', '$1$1\"'
+    $escaped = $escaped -replace '(\\+)$', '$1$1'
+    return '"' + $escaped + '"'
+}
+
+function Invoke-Tar {
+    <#
+    .SYNOPSIS
+        Runs tar and gives back what it said and what it did.
+
+    .DESCRIPTION
+        The output of a native program is not part of the transcript of
+        Windows PowerShell, so a tar that fails says nothing about why it
+        failed. The two streams are read here and put into the log.
+
+        The program is started directly instead of with the call operator, so
+        that the error stream of tar does not become a terminating error of
+        the script.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$TarPath,
+        [Parameter(Mandatory)][string[]]$Arguments,
+        [Parameter(Mandatory)][string]$WorkingDirectory
+    )
+
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $TarPath
+    $startInfo.Arguments = (($Arguments | ForEach-Object { Quote-NativeArgument $_ }) -join ' ')
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.CreateNoWindow = $true
+    $startInfo.WorkingDirectory = $WorkingDirectory
+
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+    [void]$process.Start()
+    $stdout = $process.StandardOutput.ReadToEnd()
+    $stderr = $process.StandardError.ReadToEnd()
+    $process.WaitForExit()
+
+    return [pscustomobject]@{
+        ExitCode = $process.ExitCode
+        StdOut   = $stdout
+        StdErr   = $stderr
     }
 }
 
@@ -637,15 +764,90 @@ function Get-FirmwareAssets {
     New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
     New-Item -ItemType Directory -Path $WorkingDirectory -Force | Out-Null
 
-    # tar ships with Windows 10 and later and reads xz.
-    $tar = Get-Command tar -ErrorAction SilentlyContinue
-    if ($null -eq $tar) {
-        throw 'tar.exe was not found. It ships with Windows 10 (1803) and later.'
+    Write-Host '1/4  Getting the pinned generated sources'
+
+    # The generated sources are fetched from the upstream repository, which
+    # serves them as text. That way no archive has to be unpacked, and the
+    # unpacking is the part of the pipeline that depends on what the machine
+    # has. If the repository cannot be reached, the source archive is used
+    # instead: the same files, from the same release, unpacked with tar.
+    $generatedRoot = Join-Path $WorkingDirectory 'generated'
+    if (Test-Path -LiteralPath $generatedRoot) {
+        Remove-Item -LiteralPath $generatedRoot -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $generatedRoot -Force | Out-Null
+
+    $problems = @()
+    $missing = @()
+    foreach ($pinned in $script:PinnedSources) {
+        $leaf = Split-Path -Leaf $pinned.Path
+        $destination = Join-Path $generatedRoot $leaf
+        try {
+            $null = Get-GeneratedSourceFromApi -Path $pinned.Path -Destination $destination -Sha256 $pinned.Sha256
+            Write-Host ("  {0}  {1} bytes  from the upstream repository" -f $leaf, (Get-Item -LiteralPath $destination).Length)
+        } catch {
+            $problems += ("{0}: {1}" -f $leaf, $_.Exception.Message)
+            $missing += $pinned
+        }
     }
 
-    Write-Host '1/4  Downloading the pinned NVIDIA source archive'
-    $sourceArchive = Join-Path $WorkingDirectory $script:Manifest.SourceArchive.File
-    Invoke-Download -Url $script:Manifest.SourceArchive.Url -Destination $sourceArchive -Sha256 $script:Manifest.SourceArchive.Sha256
+    if ($missing.Count -gt 0) {
+        Write-Host '  The upstream repository did not answer, so the source archive is used instead.'
+        try {
+            # tar ships with Windows 10 and later.
+            $tar = Get-Command tar -ErrorAction SilentlyContinue
+            if ($null -eq $tar) {
+                throw 'tar.exe was not found. It ships with Windows 10 (1803) and later.'
+            }
+            $version = Invoke-Tar -TarPath $tar.Source -Arguments @('--version') -WorkingDirectory $WorkingDirectory
+            Write-Host ("  tar: {0}" -f (($version.StdOut -split "`r?`n")[0]))
+
+            $sourceArchive = Join-Path $WorkingDirectory $script:Manifest.SourceArchive.File
+            Invoke-Download -Url $script:Manifest.SourceArchive.Url -Destination $sourceArchive -Sha256 $script:Manifest.SourceArchive.Sha256
+
+            $extractRoot = Join-Path $WorkingDirectory 'source'
+            if (Test-Path -LiteralPath $extractRoot) {
+                Remove-Item -LiteralPath $extractRoot -Recurse -Force
+            }
+            New-Item -ItemType Directory -Path $extractRoot -Force | Out-Null
+
+            # The member names are resolved with a listing first, so that tar
+            # does not have to match a pattern. The tar of Windows does not
+            # match them the way the one on a Linux machine does, and a
+            # pattern that it does not match ends the extraction with an
+            # error and nothing extracted.
+            $listing = Invoke-Tar -TarPath $tar.Source -Arguments @('-tf', $sourceArchive) -WorkingDirectory $WorkingDirectory
+            if ($listing.ExitCode -ne 0) {
+                throw "tar could not read the source archive (exit $($listing.ExitCode)): $($listing.StdErr.Trim())"
+            }
+            $members = @($listing.StdOut -split "`r?`n" | Where-Object { $_ })
+
+            foreach ($pinned in $missing) {
+                $leaf = Split-Path -Leaf $pinned.Path
+                $found = @($members | Where-Object { $_.EndsWith('/' + $pinned.Path) })
+                if ($found.Count -ne 1) {
+                    throw "The source archive does not hold exactly one copy of $leaf, it holds $($found.Count)"
+                }
+                $result = Invoke-Tar -TarPath $tar.Source -Arguments @('-xf', $sourceArchive, '-C', $extractRoot, $found[0]) -WorkingDirectory $WorkingDirectory
+                if ($result.ExitCode -ne 0) {
+                    throw "tar could not extract $leaf (exit $($result.ExitCode)): $($result.StdErr.Trim())"
+                }
+                $extracted = Join-Path $extractRoot ($found[0] -replace '/', '\')
+                if (-not (Test-Path -LiteralPath $extracted)) {
+                    throw "tar said that it extracted $leaf, but the file is not there"
+                }
+                Copy-Item -LiteralPath $extracted -Destination (Join-Path $generatedRoot $leaf) -Force
+
+                $actual = Get-FileSha256 (Join-Path $generatedRoot $leaf)
+                if ($actual -ne $pinned.Sha256) {
+                    throw "The extracted $leaf does not match its pinned SHA-256`n  expected $($pinned.Sha256)`n  actual   $actual"
+                }
+                Write-Host ("  {0}  {1} bytes  from the source archive" -f $leaf, (Get-Item -LiteralPath (Join-Path $generatedRoot $leaf)).Length)
+            }
+        } catch {
+            throw "$($_.Exception.Message)`nThe upstream repository was asked first, and it said:`n  $($problems -join "`n  ")"
+        }
+    }
 
     Write-Host '2/4  Downloading the pinned nvidia-utils package'
     $firmwareRoot = Join-Path $WorkingDirectory 'firmware'
@@ -679,39 +881,11 @@ function Get-FirmwareAssets {
     }
 
     Write-Host '3/4  Decoding the Booter and GSP boot images'
-    $extractRoot = Join-Path $WorkingDirectory 'source'
-    if (Test-Path -LiteralPath $extractRoot) {
-        Remove-Item -LiteralPath $extractRoot -Recurse -Force
-    }
-    New-Item -ItemType Directory -Path $extractRoot -Force | Out-Null
 
-    # Extract the two generated sources the pipeline needs. The archive has a
-    # version directory at its root, so the member paths carry a prefix that
-    # is not known in advance. Extracting the generated directory as a whole
-    # and then locating the files by name works regardless of that prefix, and
-    # the directory is small.
-    $generatedPattern = '*/src/nvidia/generated'
-    & $tar.Source -xf $sourceArchive -C $extractRoot $generatedPattern
-    if ($LASTEXITCODE -ne 0) {
-        throw "tar failed to extract the generated sources (exit $LASTEXITCODE)"
-    }
-
-    foreach ($pinned in $script:PinnedSources) {
-        $leaf = Split-Path -Leaf $pinned.Path
-        $found = @(Get-ChildItem -LiteralPath $extractRoot -Recurse -File -Filter $leaf -ErrorAction SilentlyContinue)
-        if ($found.Count -ne 1) {
-            throw "Expected exactly one copy of $leaf in the archive, found $($found.Count)"
-        }
-        $actual = Get-FileSha256 $found[0].FullName
-        if ($actual -ne $pinned.Sha256) {
-            throw "Pinned generated source mismatch: $($pinned.Path)`n  expected $($pinned.Sha256)`n  actual   $actual"
-        }
-    }
-
-    $booterFile = @(Get-ChildItem -LiteralPath $extractRoot -Recurse -File -Filter (Split-Path -Leaf $script:PinnedSources[0].Path))[0]
-    $bootFile = @(Get-ChildItem -LiteralPath $extractRoot -Recurse -File -Filter (Split-Path -Leaf $script:PinnedSources[1].Path))[0]
-    $booterSource = Get-Content -LiteralPath $booterFile.FullName -Raw
-    $bootSource = Get-Content -LiteralPath $bootFile.FullName -Raw
+    # The two sources were checked against their pinned digests when they
+    # were fetched, so what is read here is what was asked for.
+    $booterSource = Get-Content -LiteralPath (Join-Path $generatedRoot (Split-Path -Leaf $script:PinnedSources[0].Path)) -Raw
+    $bootSource = Get-Content -LiteralPath (Join-Path $generatedRoot (Split-Path -Leaf $script:PinnedSources[1].Path)) -Raw
 
     $booter = New-BooterBundle -SourceText $booterSource
     $boot = ConvertFrom-BindataArray -Text $bootSource -Label 'UCODE_IMAGE_PROD'

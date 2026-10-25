@@ -307,6 +307,57 @@ Assert-True ($null -ne $streamParameter) 'The stream parameter exists'
 Assert-Equal 'System.IO.Stream' $streamParameter.ParameterType.FullName 'The stream parameter is a stream'
 Assert-True (-not $parameters.Contains('Input')) 'The stream parameter is not called Input'
 
+Write-Host 'The tar calls'
+
+# The output of a native program is not part of the transcript of Windows
+# PowerShell, so a tar that fails has to say why, in the log. The helper
+# gives back what tar wrote and what it returned.
+. (Join-Path $root 'windows/installer/Get-FirmwareAssets.ps1')
+
+Assert-True ($null -ne (Get-Command Invoke-Tar -ErrorAction SilentlyContinue)) 'the tar caller is a function of its own'
+Assert-True ($null -ne (Get-Command Quote-NativeArgument -ErrorAction SilentlyContinue)) 'the argument quoter is a function of its own'
+Assert-True ($null -ne (Get-Command Get-GeneratedSourceFromApi -ErrorAction SilentlyContinue)) 'the mirror reader is a function of its own'
+
+# The pipeline does not let tar match a pattern. The tar of Windows does not
+# match them the way the one on a Linux machine does, and a pattern that it
+# does not match ends the extraction with an error and nothing extracted.
+$assets = Get-Content (Join-Path $root 'windows/installer/Get-FirmwareAssets.ps1') -Raw
+Assert-True (-not $assets.Contains('*/src/nvidia/generated')) 'the pipeline does not ask tar to match a pattern'
+Assert-Contains $assets "Invoke-Tar" 'the pipeline runs tar through the helper'
+
+# An argument with a space in it has to reach the program as one argument.
+Assert-Equal 'plain' (Quote-NativeArgument 'plain') 'a plain argument is left alone'
+Assert-Equal '"with space"' (Quote-NativeArgument 'with space') 'an argument with a space is quoted'
+Assert-Equal 'C:\dir\' (Quote-NativeArgument 'C:\dir\') 'an argument without a space is left alone'
+Assert-Equal '"C:\dir with space\\"' (Quote-NativeArgument 'C:\dir with space\') 'a trailing backslash is doubled in a quoted argument'
+
+$tarPath = (Get-Command tar -ErrorAction SilentlyContinue).Source
+if ($tarPath) {
+    $scratch = Join-Path ([System.IO.Path]::GetTempPath()) ('wgpu-tar-' + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $scratch -Force | Out-Null
+    try {
+        # A file with a known name, so that the listing has something to say.
+        [System.IO.File]::WriteAllText((Join-Path $scratch 'member.txt'), "hello`n")
+        $archive = Join-Path $scratch 'test.tar'
+        & $tarPath -cf $archive -C $scratch 'member.txt'
+        if ($LASTEXITCODE -ne 0) { throw 'the test archive could not be made' }
+
+        $listing = Invoke-Tar -TarPath $tarPath -Arguments @('-tf', $archive) -WorkingDirectory $scratch
+        Assert-Equal 0 $listing.ExitCode 'tar lists the archive'
+        Assert-True ($listing.StdOut -like '*member.txt*') 'the listing names the member'
+
+        # A member that is not in the archive makes tar fail, and it says so
+        # on its error stream. That is what has to reach the log.
+        $failure = Invoke-Tar -TarPath $tarPath -Arguments @('-xf', $archive, '-C', $scratch, 'nosuchmember.txt') -WorkingDirectory $scratch
+        Assert-True ($failure.ExitCode -ne 0) 'tar fails on a member that is not there'
+        Assert-True ($failure.StdErr.Trim().Length -gt 0) 'tar says why it failed'
+    } finally {
+        if (Test-Path -LiteralPath $scratch) {
+            Remove-Item -LiteralPath $scratch -Recurse -Force
+        }
+    }
+}
+
 Write-Host 'The entry point of the installer'
 
 # The packaged installer calls this script with these switches, so they have
