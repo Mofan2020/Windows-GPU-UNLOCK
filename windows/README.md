@@ -148,6 +148,11 @@ the zstd stream, walks the tar headers, writes the wanted member and exits. The
 helper is built from the Zstandard reference implementation, which is vendored
 under `windows/installer/zstd/lib/`.
 
+The helper reads its input in binary mode. The standard input of a Windows
+program is in text mode by default, and a read in text mode stops at the first
+Ctrl-Z byte and turns a CRLF into a LF. The compressed stream holds both, so
+the read would stop in the middle of the first block.
+
 ## Compatibility
 
 | Chip  | Cards                          | Device IDs                    | State                              |

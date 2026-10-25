@@ -36,10 +36,31 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(_WIN32)
+#include <fcntl.h>
+#include <io.h>
+#endif
+
 #define ZSTD_STATIC_LINKING_ONLY
 #include "lib/zstd.h"
 
 #define TAR_BLOCK 512
+
+/*
+ * Puts the standard input into binary mode.
+ *
+ * On Windows the standard input of a program is in text mode by default.
+ * That translates a CRLF into a LF and stops the read at the first Ctrl-Z
+ * byte. The compressed stream is binary, so it holds both of those, and the
+ * read would stop in the middle of the first block. The stream then looks
+ * truncated and the member cannot be extracted.
+ */
+static void use_binary_stdin(void)
+{
+#if defined(_WIN32)
+    _setmode(_fileno(stdin), _O_BINARY);
+#endif
+}
 
 /*
  * A tar stream reader on top of the decompressor. The decompressed bytes are
@@ -195,6 +216,8 @@ int main(int argc, char **argv)
     int written = 0;
     int status = 1;
     struct reader reader;
+
+    use_binary_stdin();
 
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--member") == 0 && i + 1 < argc) {

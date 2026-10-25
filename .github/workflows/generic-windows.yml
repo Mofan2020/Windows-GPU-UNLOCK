@@ -94,6 +94,18 @@ jobs:
           zstd -q -f -o build/fixture/fixture.tar.zst build/fixture/fixture.tar
           sha256sum build/fixture/test/member.bin | tee build/fixture/member.sha256
 
+          # The standard input of a Windows program is in text mode by
+          # default, and a read in text mode stops at the first Ctrl-Z byte.
+          # The fixture has to hold one early, or the test would not cover
+          # that trap.
+          python3 - <<'PY'
+          data = open('build/fixture/fixture.tar.zst', 'rb').read()
+          position = data.find(b'\x1a')
+          if position < 0 or position > 65536:
+              raise SystemExit('the fixture holds no Ctrl-Z byte in the first 64 KiB')
+          print('the fixture holds a Ctrl-Z byte at offset', position)
+          PY
+
       # Everything that the next job needs is staged in one directory, so
       # that the artifact does not carry the tree of the repository with it.
       - name: Stage the artifact
