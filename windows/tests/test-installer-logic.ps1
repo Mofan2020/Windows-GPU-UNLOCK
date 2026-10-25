@@ -65,6 +65,30 @@ foreach ($script in (Get-ChildItem (Join-Path $root 'windows/installer') -Filter
         ("{0} parses: {1}" -f $script.Name, (($parseErrors | ForEach-Object { $_.Message }) -join '; '))
 }
 
+# A format expression in a command has to be in parentheses. Without them
+# PowerShell reads the -f as the name of a parameter, and the value that
+# comes after it ends up in the parameter that comes next. That happened with
+# the last line of the installer: the installation itself had worked, but the
+# line that says so failed, and the installer reported a failure because of
+# it. The parser tells the two forms apart, so the check is exact.
+foreach ($script in (Get-ChildItem (Join-Path $root 'windows/installer') -Filter *.ps1)) {
+    $parseErrors = $null
+    $tree = [System.Management.Automation.Language.Parser]::ParseFile($script.FullName, [ref]$null, [ref]$parseErrors)
+    if ($null -eq $tree) { continue }
+    $commands = $tree.FindAll({
+            param($node) $node -is [System.Management.Automation.Language.CommandAst]
+        }, $true)
+    foreach ($command in $commands) {
+        if ($command.GetCommandName() -ne 'Write-Host') { continue }
+        foreach ($element in $command.CommandElements) {
+            if ($element -isnot [System.Management.Automation.Language.CommandParameterAst]) { continue }
+            if ($element.ParameterName -ne 'f') { continue }
+            Assert-True $false ("{0}:{1} has a format expression without parentheses" -f `
+                    $script.Name, $element.Extent.StartLineNumber)
+        }
+    }
+}
+
 # ---------------------------------------------------------------------------
 # Stubs for the Windows specific commands.
 # ---------------------------------------------------------------------------
@@ -274,7 +298,6 @@ Assert-True $result.CanInstall 'A prepared machine is still allowed'
 Assert-True (-not $result.FastStartup) 'The Fast Startup flag is cleared'
 
 Write-Host 'The boot configuration parser'
-
 # bcdedit does not always report a failure in its exit code. It writes the
 # reason into its output and returns zero all the same, so the output has to
 # be read as well. That is what the installer does now, and the reasons that

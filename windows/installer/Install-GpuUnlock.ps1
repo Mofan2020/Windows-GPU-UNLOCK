@@ -234,7 +234,7 @@ function Install-GpuUnlock {
     Write-Host '    before Windows, unlocks the card and then starts Windows.' -ForegroundColor Green
     Write-Host ''
     Write-Host '    The report of every run is written to:' -ForegroundColor Green
-    Write-Host "      {0}\EFI\WindowsGPUUnlock\RUNnn\REPORT.TXT" -f $espPath -ForegroundColor Green
+    Write-Host ("      {0}\EFI\WindowsGPUUnlock\RUNnn\REPORT.TXT" -f $espPath) -ForegroundColor Green
     Write-Host ''
     Write-Host '    To remove it, run this installer again and choose Uninstall.' -ForegroundColor Green
 }
@@ -313,7 +313,7 @@ function Uninstall-GpuUnlock {
     Write-Step 'Uninstallation finished'
     Write-Host ''
     Write-Host '    The boot configuration backup is kept in:' -ForegroundColor Green
-    Write-Host "      {0}" -f $state.BackupRoot -ForegroundColor Green
+    Write-Host ("      {0}" -f $state.BackupRoot) -ForegroundColor Green
 }
 
 # Load the modules that sit next to this file.
