@@ -247,6 +247,8 @@ jobs:
           & $bcdedit /enum '{fwbootmgr}'
           Write-Host '--- bcdedit /enum {fwbootmgr} /v ---'
           & $bcdedit /enum '{fwbootmgr}' /v
+          Write-Host '--- bcdedit /enum all ---'
+          & $bcdedit /enum all
       # The parser of the installer is run against the output of a real
       # bcdedit, and the whole registration cycle is carried out on the
       # runner, so that a difference between the parser and the real output
@@ -258,6 +260,7 @@ jobs:
           . ./windows/installer/Installer-Common.ps1
 
           $description = 'Windows GPU UNLOCK (CI)'
+          $bcdedit = Join-Path $env:SystemRoot 'System32\bcdedit.exe'
           $newId = ''
           $beforeOrder = @()
 
@@ -281,39 +284,48 @@ jobs:
             $existing = Get-BcdEntryId -Text (Invoke-Bcd @('/enum', 'all')) -Description $description
             if ($existing) { throw 'a boot entry with that name is already there' }
 
-            [void](Invoke-Bcd @('/copy', '{bootmgr}', '/d', $description))
-            $newId = Get-BcdEntryId -Text (Invoke-Bcd @('/enum', 'all')) -Description $description
-            if (-not $newId) { throw 'the new boot entry could not be found' }
-            Write-Host "OK   the new boot entry is $newId"
+            # An entry that is made from nothing, with an identifier that is
+            # known from the start. Nothing is inherited from the Windows Boot
+            # Manager, so there is nothing in it that points at a Windows
+            # loader.
+            $created = '{7c1f9d20-6f0a-4a1e-9d33-0b5e5a5c1a01}'
+            [void](Invoke-Bcd @('/create', $created, '/d', $description, '/application'))
+            Write-Host '--- bcdedit /enum the created entry ---'
+            & $bcdedit /enum $created
+            Write-Host '--- bcdedit /enum the created entry, verbose ---'
+            & $bcdedit /enum $created /v
 
-            # What the copy brought with it.
-            $entryText = Invoke-Bcd @('/enum', $newId, '/v') -LogOutput
+            [void](Invoke-Bcd @('/set', $created, 'device', $managerDevices[0]))
+            [void](Invoke-Bcd @('/set', $created, 'path', '\EFI\WindowsGPUUnlock\UNLOCK.EFI'))
+            $entryText = Invoke-Bcd @('/enum', $created, '/v') -LogOutput
             $entryDevices = @(Get-BcdPropertyValue -Text $entryText -ValuePattern '^partition=')
-            Write-Host "OK   the copy boots from $($entryDevices -join ', ')"
-
-            if ($entryDevices.Count -eq 0 -or $entryDevices[0] -ne $managerDevices[0]) {
-              [void](Invoke-Bcd @('/set', $newId, 'device', $managerDevices[0]))
-              $entryText = Invoke-Bcd @('/enum', $newId, '/v') -LogOutput
-              $entryDevices = @(Get-BcdPropertyValue -Text $entryText -ValuePattern '^partition=')
-              if ($entryDevices.Count -eq 0) { throw 'the boot entry does not name a device' }
-              Write-Host "OK   the device was set to $($entryDevices[0])"
-            }
-
-            [void](Invoke-Bcd @('/set', $newId, 'path', '\EFI\WindowsGPUUnlock\UNLOCK.EFI'))
-            $entryText = Invoke-Bcd @('/enum', $newId, '/v') -LogOutput
+            Write-Host "OK   the entry boots from $($entryDevices -join ', ')"
             if (-not (Test-BcdPropertyValue -Text $entryText -Value '\EFI\WindowsGPUUnlock\UNLOCK.EFI')) {
               throw 'the boot entry does not point at the staged application'
             }
             Write-Host 'OK   the entry points at the staged application'
 
-            # The firmware boot order.
-            $newOrder = @($newId) + @($beforeOrder | Where-Object { $_ -ne $newId })
+            $newOrder = @($created) + @($beforeOrder | Where-Object { $_ -ne $created })
             [void](Invoke-Bcd (@('/set', '{fwbootmgr}', 'displayorder') + $newOrder))
             $afterOrder = @(Get-BcdDisplayOrder (Invoke-Bcd @('/enum', '{fwbootmgr}', '/v') -LogOutput))
             if (($afterOrder -join ',') -ne ($newOrder -join ',')) {
               throw "the firmware boot order does not match the plan: expected $($newOrder -join ','), got $($afterOrder -join ',')"
             }
             Write-Host 'OK   the entry is first in the firmware boot order'
+            $newId = $created
+
+            # The same thing, but made as a copy of the Windows Boot Manager,
+            # so that the output of both ways can be compared.
+            [void](Invoke-Bcd @('/copy', '{bootmgr}', '/d', 'Windows GPU UNLOCK (copy)'))
+            Write-Host '--- bcdedit /enum all after the copy ---'
+            & $bcdedit /enum all
+            $copyId = Get-BcdEntryId -Text (Invoke-Bcd @('/enum', 'all')) -Description 'Windows GPU UNLOCK (copy)'
+            Write-Host "the copy was found as '$copyId'"
+            Write-Host '--- bcdedit /enum all, verbose ---'
+            & $bcdedit /enum all /v
+            if ($copyId) {
+              & $bcdedit /delete $copyId
+            }
           } finally {
             # The runner has to boot the way it did before.
             $bcdedit = Join-Path $env:SystemRoot 'System32\bcdedit.exe'
