@@ -45,7 +45,7 @@ jobs:
           }
           if (-not $lld) { throw 'lld-link.exe was not found' }
 
-          & "$PSScriptRoot\windows\efi\build.ps1" -Clang $clang -LldLink $lld -Output "$PWD\build"
+          & "$env:GITHUB_WORKSPACE\windows\efi\build.ps1" -Clang $clang -LldLink $lld -Output "$PWD\build"
           if ($LASTEXITCODE -ne 0) { throw 'The EFI build failed' }
 
       - name: Verify the PE image
@@ -101,6 +101,7 @@ jobs:
           }
           if (-not $clang) { throw 'clang.exe was not found' }
 
+          New-Item -ItemType Directory -Path build -Force | Out-Null
           & $clang -std=c11 -Wall -Wextra -Werror -O1 -DGU_HOST_TEST=1 `
             -o build/test_generic_board.exe `
             windows/tests/test_generic_board.c windows/efi/board.c windows/efi/checks.c
@@ -186,9 +187,17 @@ jobs:
           }
           if (-not $makensis) { throw 'makensis.exe was not found' }
 
+          # A tag of the form v1.2.3 names the package; anything else is a
+          # development build.
+          $version = '1.0.0-dev'
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            $version = $env:GITHUB_REF_NAME -replace '^v', ''
+          }
+          Write-Host "Building the installer for version $version"
+
           Push-Location windows/installer
           try {
-            & $makensis "-DVERSION=$env:GITHUB_REF_NAME" "-DPAYLOAD=..\..\build" "-DHELPER=..\..\build\helper" WindowsGPUUnlock.nsi
+            & $makensis "-DVERSION=$version" "-DPAYLOAD=..\..\build" "-DHELPER=..\..\build\helper" WindowsGPUUnlock.nsi
             if ($LASTEXITCODE -ne 0) { throw 'The installer packaging failed' }
           } finally {
             Pop-Location

@@ -18,6 +18,7 @@
 set -eu
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+cd "$here"
 target=${1:-host}
 out="$here/build"
 
