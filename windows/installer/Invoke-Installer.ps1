@@ -280,6 +280,27 @@ try {
         throw $detail
     }
 
+    # The EFI application and the helper are unpacked here, out of the text
+    # files that the installer carries them in. They are not unpacked by the
+    # installer itself, because antivirus software often refuses an unsigned
+    # EFI application, and the installer would then not even start.
+    $payloadRoot = $PayloadDirectory
+    if (-not $payloadRoot) {
+        $payloadRoot = Join-Path $env:TEMP 'WindowsGPUUnlock'
+    }
+    Write-Host ''
+    Write-Host 'Unpacking the application and the helper'
+    try {
+        $unpacked = Expand-InstallerPayload -ScriptRoot $PSScriptRoot -TargetDirectory $payloadRoot
+        Write-Host ("  {0}" -f $unpacked.Application) -ForegroundColor DarkGray
+        Write-Host ("  {0}" -f $unpacked.Helper) -ForegroundColor DarkGray
+    } catch {
+        $result = 'failed'
+        $detail = "The application could not be unpacked: $($_.Exception.Message)"
+        $exitCode = 1
+        throw $detail
+    }
+
     if (-not $Silent) {
         Show-Notes
     }
@@ -353,7 +374,7 @@ try {
             if ($exitCode -eq 0) {
                 $payload = $PayloadDirectory
                 if (-not $payload) {
-                    $payload = Join-Path $PSScriptRoot 'payload'
+                    $payload = Join-Path $env:TEMP 'WindowsGPUUnlock'
                 }
 
                 & (Join-Path $PSScriptRoot 'Install-GpuUnlock.ps1') `

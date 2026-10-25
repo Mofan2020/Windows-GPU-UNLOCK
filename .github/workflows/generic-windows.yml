@@ -275,10 +275,20 @@ jobs:
           }
           Write-Host "Building the installer for version $version"
 
+          # The EFI application and the helper are carried as base64 text.
+          # Antivirus software often refuses an unsigned EFI application, and
+          # the installer would then not even unpack it.
+          & pwsh -NoProfile -File windows/installer/Stage-Payload.ps1 `
+            -Application build/UNLOCK.EFI `
+            -Helper build/helper/zstdcat.exe `
+            -OutputDirectory build/payload `
+            -HelperOutputDirectory build/helper
+          if ($LASTEXITCODE -ne 0) { throw 'The payload could not be staged' }
+
           Push-Location windows/installer
           try {
             & $makensis "-DVERSION=$version" "-DPRODUCT_VERSION=$productVersion" `
-              "-DPAYLOAD=..\..\build" "-DHELPER=..\..\build\helper" WindowsGPUUnlock.nsi
+              "-DPAYLOAD=..\..\build\payload" "-DHELPER=..\..\build\helper" WindowsGPUUnlock.nsi
             if ($LASTEXITCODE -ne 0) { throw 'The installer packaging failed' }
           } finally {
             Pop-Location
@@ -300,6 +310,11 @@ jobs:
         with:
           name: installer
           path: build/installer
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: efi-application
+          path: build/efi
 
       # The packaged installer is run for real, so that the whole chain from
       # the window down to the scripts is covered. The runner has no card
@@ -351,6 +366,26 @@ jobs:
           foreach ($needle in @('Windows GPU UNLOCK', 'System checks', 'Secure Boot', 'WGPU-RESULT:')) {
             if ($text -notlike "*$needle*") { throw "the log does not mention: $needle" }
           }
+
+          # The application is carried as text and unpacked by the script.
+          # The file that comes out has to be the one that was packed.
+          $unpacked = Join-Path $env:TEMP 'WindowsGPUUnlock\UNLOCK.EFI'
+          if (-not (Test-Path $unpacked)) { throw 'the application was not unpacked' }
+          $expected = (Get-Content build/efi/pe-verification.json -Raw | ConvertFrom-Json).sha256
+          $actual = (Get-FileHash $unpacked -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected.ToLowerInvariant()) {
+            throw "the unpacked application does not match: expected $expected, got $actual"
+          }
+          Write-Host "OK   the application was unpacked and matches ($actual)"
+
+          $helper = Join-Path $env:TEMP 'WindowsGPUUnlock\zstdcat.exe'
+          if (-not (Test-Path $helper)) { throw 'the helper was not unpacked' }
+          Write-Host 'OK   the helper was unpacked'
+
+          foreach ($name in @('unlock-payload.txt', 'helper-payload.txt', 'payload-manifest.txt')) {
+            if (-not (Test-Path (Join-Path $target $name))) { throw "the installer did not write $name" }
+          }
+          Write-Host 'OK   the installer carries the payload as text'
 
           if ($text -match 'WGPU-RESULT: ok') {
             if ($exitCode -ne 0) { throw "the installer said ok but returned $exitCode" }

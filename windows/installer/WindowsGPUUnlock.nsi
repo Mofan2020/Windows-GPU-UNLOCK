@@ -65,7 +65,7 @@ VIAddVersionKey "ProductVersion" "${PRODUCT_VERSION}"
 ; The notes are on the welcome page, so that they are read before anything
 ; is done. The long version is in the log and in the documentation.
 !define MUI_WELCOMEPAGE_TITLE "${PRODUCT} ${VERSION}"
-!define MUI_WELCOMEPAGE_TEXT "This installer unlocks the FP16 and BF16 tensor instruction rate on NVIDIA GeForce RTX 30-series cards (GA102, GA103, GA104, GA106 - the RTX 3090, 3080, 3070 and 3060 families).`r`n`r`nBEFORE YOU CONTINUE, READ THIS:`r`n`r`n1. Secure Boot must be OFF in your BIOS. The application is not signed, so a firmware that enforces Secure Boot will refuse to load it.`r`n`r`n2. Windows Fast Startup must be OFF, so that a shutdown really powers the card down. Run: powercfg /h off`r`n`r`n3. If BitLocker protects your Windows volume, suspend it first. Run: manage-bde -protectors -disable C:`r`n`r`n4. The card that is unlocked must NOT drive the display. Use a machine with an integrated GPU and keep the screen plugged into it.`r`n`r`n5. The installer is not signed, so Windows may warn about an unknown publisher.`r`n`r`n6. About 100 MB is downloaded from NVIDIA and the CachyOS archive. The NVIDIA firmware files are not part of this package, because NVIDIA's licence does not allow it; they are generated on this machine and checked against their SHA-256.`r`n`r`nThis is experimental. It writes to the card's firmware and to its registers. Keep a bootable USB handy, and do not use it on a machine you depend on for work."
+!define MUI_WELCOMEPAGE_TEXT "This installer unlocks the FP16 and BF16 tensor instruction rate on NVIDIA GeForce RTX 30-series cards (GA102, GA103, GA104, GA106 - the RTX 3090, 3080, 3070 and 3060 families).`r`n`r`nBEFORE YOU CONTINUE, READ THIS:`r`n`r`n1. Secure Boot must be OFF in your BIOS. The application is not signed, so a firmware that enforces Secure Boot will refuse to load it.`r`n`r`n2. Windows Fast Startup must be OFF, so that a shutdown really powers the card down. Run: powercfg /h off`r`n`r`n3. If BitLocker protects your Windows volume, suspend it first. Run: manage-bde -protectors -disable C:`r`n`r`n4. The card that is unlocked must NOT drive the display. Use a machine with an integrated GPU and keep the screen plugged into it.`r`n`r`n5. The installer is not signed, so Windows may warn about an unknown publisher. Antivirus software may also block the application. If it says 'Error opening file for writing', add this folder to the trust list of your antivirus software, or install into another folder.`r`n`r`n6. About 100 MB is downloaded from NVIDIA and the CachyOS archive. The NVIDIA firmware files are not part of this package, because NVIDIA's licence does not allow it; they are generated on this machine and checked against their SHA-256.`r`n`r`nThis is experimental. It writes to the card's firmware and to its registers. Keep a bootable USB handy, and do not use it on a machine you depend on for work."
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
@@ -107,6 +107,15 @@ FunctionEnd
 Section "Install"
   SetOutPath "$INSTDIR"
 
+  ; Say what is being unpacked, so that the log says where the installer
+  ; stopped if it does.
+  ClearErrors
+  FileOpen $2 "$INSTDIR\${LOGFILE}" a
+  IfErrors progress_before_done
+    FileWrite $2 "Unpacking the files.`r`n"
+  FileClose $2
+  progress_before_done:
+
   ; The scripts that do the work.
   File "..\installer\Invoke-Installer.ps1"
   File "..\installer\Install-GpuUnlock.ps1"
@@ -115,15 +124,24 @@ Section "Install"
   File "..\installer\Test-Preconditions.ps1"
   File "..\installer\Get-FirmwareAssets.ps1"
 
-  ; The EFI application. It is small, and it is ours, so it can be bundled.
-  File /oname=payload\UNLOCK.EFI "${PAYLOAD}\UNLOCK.EFI"
-
-  ; The helper that reads the zstd compressed firmware package. The tar.exe
-  ; of Windows cannot do that, so the helper is part of the installer.
-  File /oname=zstdcat.exe "${HELPER}\zstdcat.exe"
+  ; The EFI application and the helper are carried as text, not as files.
+  ; Antivirus software on a Windows machine often refuses an unsigned EFI
+  ; application, and then the installer cannot even unpack it. Base64 in a
+  ; text file is not noticed, and the script writes the real files out
+  ; itself, where a failure can be reported in the log.
+  File /oname=unlock-payload.txt "${PAYLOAD}\unlock-payload.txt"
+  File /oname=helper-payload.txt "${HELPER}\helper-payload.txt"
+  File /oname=payload-manifest.txt "${PAYLOAD}\payload-manifest.txt"
 
   ; The uninstaller is the same script in reverse.
   WriteUninstaller "$INSTDIR\Uninstall.exe"
+
+  ClearErrors
+  FileOpen $2 "$INSTDIR\${LOGFILE}" a
+  IfErrors progress_after_done
+    FileWrite $2 "The files are unpacked.`r`n"
+  FileClose $2
+  progress_after_done:
 
   ; Record where the scripts live so the uninstaller can find them.
   WriteRegStr HKLM "Software\WindowsGPUUnlock" "InstallDir" "$INSTDIR"
@@ -170,7 +188,7 @@ Section "Install"
 
   DetailPrint "Running the installer..."
   ClearErrors
-  ExecWait '"$0" -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\Invoke-Installer.ps1" -PayloadDirectory "$INSTDIR\payload" -Yes -LogPath "$INSTDIR\${LOGFILE}"$4' $1
+  ExecWait '"$0" -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\Invoke-Installer.ps1" -PayloadDirectory "$TEMP\WindowsGPUUnlock" -Yes -LogPath "$INSTDIR\${LOGFILE}"$4' $1
 
   ; The staged files live on the EFI system partition, not under $INSTDIR,
   ; so the uninstaller has to remove them itself. Record that.
@@ -211,6 +229,9 @@ Section "Uninstall"
 
   Delete "$INSTDIR\payload\UNLOCK.EFI"
   Delete "$INSTDIR\zstdcat.exe"
+  Delete "$INSTDIR\unlock-payload.txt"
+  Delete "$INSTDIR\helper-payload.txt"
+  Delete "$INSTDIR\payload-manifest.txt"
   Delete "$INSTDIR\Invoke-Installer.ps1"
   Delete "$INSTDIR\Install-GpuUnlock.ps1"
   Delete "$INSTDIR\Installer-Common.ps1"
@@ -221,6 +242,10 @@ Section "Uninstall"
   Delete "$INSTDIR\${LOGFILE}"
   RMDir "$INSTDIR\payload"
   RMDir "$INSTDIR"
+
+  ; The application and the helper are unpacked into the temporary folder
+  ; when the installer runs, so they are removed again here.
+  RMDir /r "$TEMP\WindowsGPUUnlock"
 
   DeleteRegKey HKLM "${UNINSTKEY}"
   DeleteRegKey HKLM "Software\WindowsGPUUnlock"

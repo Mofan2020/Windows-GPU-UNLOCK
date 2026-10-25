@@ -324,6 +324,47 @@ Assert-Contains $source 'WGPU-RESULT' 'the entry point writes a result marker'
 Assert-Contains $source 'Start-Transcript' 'the entry point writes a log file'
 Assert-Contains $source 'Stop-Transcript' 'the entry point closes the log file'
 
+Write-Host 'The payload that the installer carries'
+
+# The EFI application and the helper are carried as base64 text, because
+# antivirus software on a Windows machine often refuses an unsigned EFI
+# application, and the installer would then not even unpack it. The file
+# that comes out has to be the one that went in.
+. (Join-Path $root 'windows/installer/Installer-Common.ps1')
+Assert-True ($null -ne (Get-Command Expand-EmbeddedPayload -ErrorAction SilentlyContinue)) 'the unpacker is a function of its own'
+Assert-True ($null -ne (Get-Command Expand-InstallerPayload -ErrorAction SilentlyContinue)) 'the payload unpacker is a function of its own'
+
+$scratch = Join-Path ([System.IO.Path]::GetTempPath()) ('wgpu-payload-' + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $scratch -Force | Out-Null
+try {
+    # A file with a known content, written as the text that the installer
+    # would carry.
+    $original = [byte[]](0, 1, 2, 3, 250, 251, 252, 253, 254, 255)
+    $text = [Convert]::ToBase64String($original)
+    $textFile = Join-Path $scratch 'sample-payload.txt'
+    [System.IO.File]::WriteAllText($textFile, $text)
+
+    $target = Join-Path $scratch 'sample.bin'
+    $digest = [System.BitConverter]::ToString([System.Security.Cryptography.SHA256]::Create().ComputeHash($original)).Replace('-', '').ToLowerInvariant()
+    $null = Expand-EmbeddedPayload -TextFile $textFile -TargetPath $target -ExpectedSha256 $digest
+    $actual = [System.IO.File]::ReadAllBytes($target)
+    Assert-Equal $original.Length $actual.Length 'the unpacked file has the same length'
+    Assert-True ([System.Linq.Enumerable]::SequenceEqual([byte[]]$original, [byte[]]$actual)) 'the unpacked file has the same content'
+
+    # A digest that does not match has to be refused.
+    $refused = $false
+    try {
+        $null = Expand-EmbeddedPayload -TextFile $textFile -TargetPath $target -ExpectedSha256 ('0' * 64)
+    } catch {
+        $refused = $true
+    }
+    Assert-True $refused 'an unpacked file with the wrong digest is refused'
+} finally {
+    if (Test-Path -LiteralPath $scratch) {
+        Remove-Item -LiteralPath $scratch -Recurse -Force
+    }
+}
+
 Write-Host ''
 if ($script:Failures -eq 0) {
     Write-Host "all checks passed ($script:Checks)" -ForegroundColor Green

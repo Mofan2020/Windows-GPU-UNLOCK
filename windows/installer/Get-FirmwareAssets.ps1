@@ -197,11 +197,18 @@ function Assert-HttpsUrl {
 function Get-ZstdHelper {
     <#
     .SYNOPSIS
-        Locates the zstdcat helper next to the installer scripts.
+        Locates the zstdcat helper.
+    .DESCRIPTION
+        The helper is unpacked by the installer into a directory in the
+        temporary folder, because the installer carries it as text. An older
+        layout had it next to the scripts, and that is still looked at.
     #>
-    $root = $script:ScriptRoot
-    foreach ($name in @('zstdcat.exe', 'zstdcat')) {
-        $candidate = Join-Path $root $name
+    $candidates = @(
+        (Join-Path $env:TEMP 'WindowsGPUUnlock\zstdcat.exe'),
+        (Join-Path $script:ScriptRoot 'zstdcat.exe'),
+        (Join-Path $script:ScriptRoot 'zstdcat')
+    )
+    foreach ($candidate in $candidates) {
         if (Test-Path -LiteralPath $candidate) {
             return $candidate
         }
