@@ -78,13 +78,30 @@ VIAddVersionKey "ProductVersion" "${PRODUCT_VERSION}"
 !insertmacro MUI_LANGUAGE "English"
 
 Function .onInit
-  ; The installer writes to the EFI system partition and edits the boot
-  ; configuration, both of which need the administrator token. The manifest
-  ; requests it, but check as well so that the failure is clear rather than
-  ; mysterious.
-  IfErrors 0 +2
-  MessageBox MB_ICONSTOP "The installer could not obtain administrator rights. Right-click the file and choose 'Run as administrator'."
-  Abort
+  ; The error flag at this point says nothing about the administrator
+  ; rights. It holds the result of the last thing the installer did before
+  ; this function, and InstallDirRegKey leaves it set when the key is not
+  ; there yet, which is the case on a machine that has never seen this
+  ; program. So the flag is cleared, and the real check is done by the
+  ; script, where the answer can be written into the log.
+  ClearErrors
+
+  ; The log is started here, before anything else can fail, so that a file
+  ; with this name on the disk means the installer really did run. It is
+  ; also the only record there is if the installer gives up later.
+  ClearErrors
+  CreateDirectory "$INSTDIR"
+  Delete "$INSTDIR\${LOGFILE}"
+  ClearErrors
+  FileOpen $2 "$INSTDIR\${LOGFILE}" w
+  IfErrors log_open_failed
+    FileWrite $2 "The installer started on this machine."
+    FileWrite $2 ""
+  FileClose $2
+  Goto log_opened
+
+  log_open_failed:
+  log_opened:
 FunctionEnd
 
 Section "Install"
@@ -119,19 +136,8 @@ Section "Install"
   WriteRegDWORD HKLM "${UNINSTKEY}" "NoModify" 1
   WriteRegDWORD HKLM "${UNINSTKEY}" "NoRepair" 1
 
-  ; The log is started here, before anything else happens, so that a file
-  ; with this name on the disk means the installer really did run.
-  Delete "$INSTDIR\${LOGFILE}"
-  ClearErrors
-  FileOpen $2 "$INSTDIR\${LOGFILE}" w
-  IfErrors log_open_failed
-    FileWrite $2 "The installer started on this machine."
-    FileWrite $2 ""
-  FileClose $2
-  Goto log_opened
-
-  log_open_failed:
-  log_opened:
+  ; The log was started in .onInit. The script appends to it, so that the
+  ; first line, which says that the installer ran, is kept.
 
   ; Find PowerShell. The installer is a 32 bit program, so the system
   ; directory of a 64 bit Windows is the 32 bit one. The 32 bit PowerShell

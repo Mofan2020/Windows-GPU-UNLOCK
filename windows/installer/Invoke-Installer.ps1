@@ -54,17 +54,37 @@ if (-not $LogPath) {
 }
 
 # The log is written first, so that a failure while loading the other
-# scripts is in there as well.
+# scripts is in there as well. The file is appended to, because the
+# packaged installer writes the first line itself, before it starts this
+# script.
 $transcript = $null
 try {
     $logDirectory = Split-Path -Parent $LogPath
     if ($logDirectory -and -not (Test-Path -LiteralPath $logDirectory)) {
         New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
     }
-    Start-Transcript -Path $LogPath -Force | Out-Null
+    if (Test-Path -LiteralPath $LogPath) {
+        Start-Transcript -Path $LogPath -Append | Out-Null
+    } else {
+        Start-Transcript -Path $LogPath -Force | Out-Null
+    }
     $transcript = $true
 } catch {
     Write-Host "The log file could not be opened: $($_.Exception.Message)"
+}
+
+function Test-Administrator {
+    <#
+    .SYNOPSIS
+        Whether the script runs with the administrator token.
+    #>
+    try {
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+        return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    } catch {
+        return $false
+    }
 }
 
 function Write-Heading {
@@ -251,6 +271,13 @@ try {
     Write-Host 'Windows GPU UNLOCK' -ForegroundColor White
     Write-Host 'Installer for the generic (all GA10x) build.' -ForegroundColor DarkGray
     Write-Host "Log file: $LogPath" -ForegroundColor DarkGray
+
+    if (-not (Test-Administrator)) {
+        $result = 'failed'
+        $detail = 'the administrator rights are missing. Right-click the file and choose "Run as administrator".'
+        $exitCode = 1
+        throw $detail
+    }
 
     if (-not $Silent) {
         Show-Notes
