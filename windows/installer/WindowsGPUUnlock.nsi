@@ -78,6 +78,13 @@ VIAddVersionKey "ProductVersion" "${PRODUCT_VERSION}"
 !insertmacro MUI_LANGUAGE "English"
 
 Function .onInit
+  ; The registry is read and written in the 64 bit view, because the scripts
+  ; that do the work run in a 64 bit PowerShell. A 32 bit program writes to
+  ; the other view, and the two would not see each other. This has to be
+  ; set before the install directory is looked up, because that is read
+  ; from the registry.
+  SetRegView 64
+
   ; The error flag at this point says nothing about the administrator
   ; rights. It holds the result of the last thing the installer did before
   ; this function, and InstallDirRegKey leaves it set when the key is not
@@ -101,6 +108,45 @@ Function .onInit
 
   log_open_failed:
   log_opened:
+FunctionEnd
+
+Function Locate-PowerShell
+  ; The 64 bit PowerShell is wanted, because bcdedit.exe is a 64 bit
+  ; program and there is no 32 bit copy of it. This program is a 32 bit one,
+  ; so the 64 bit system directory is reached through the Sysnative alias.
+  ; The script starts itself again as a 64 bit process when it has to, so
+  ; this is a first try rather than the only one.
+  StrCpy $0 "$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe"
+  IfFileExists $0 0 +2
+    Return
+  StrCpy $0 "$SYSDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe"
+  IfFileExists $0 0 +2
+    Return
+  StrCpy $0 "$WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
+  IfFileExists $0 0 +2
+    Return
+  StrCpy $0 "$SYSDIR\WindowsPowerShell\v1.0\powershell.exe"
+  IfFileExists $0 0 +2
+    Return
+  StrCpy $0 ""
+FunctionEnd
+
+Function un.Locate-PowerShell
+  ; The same as the function above, for the uninstaller. A section of the
+  ; uninstaller may only call a function whose name starts with "un.".
+  StrCpy $0 "$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe"
+  IfFileExists $0 0 +2
+    Return
+  StrCpy $0 "$SYSDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe"
+  IfFileExists $0 0 +2
+    Return
+  StrCpy $0 "$WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
+  IfFileExists $0 0 +2
+    Return
+  StrCpy $0 "$SYSDIR\WindowsPowerShell\v1.0\powershell.exe"
+  IfFileExists $0 0 +2
+    Return
+  StrCpy $0 ""
 FunctionEnd
 
 Section "Install"
@@ -162,22 +208,23 @@ Section "Install"
   ; The log was started in .onInit. The script appends to it, so that the
   ; first line, which says that the installer ran, is kept.
 
-  ; Find PowerShell. The installer is a 32 bit program, so the system
-  ; directory of a 64 bit Windows is the 32 bit one. The 32 bit PowerShell
-  ; is there as well, but the 64 bit one is the better choice.
-  StrCpy $0 "$SYSDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe"
-  IfFileExists $0 powershell_found
-  StrCpy $0 "$SYSDIR\WindowsPowerShell\v1.0\powershell.exe"
-  IfFileExists $0 powershell_found
-  StrCpy $0 "$WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
-  IfFileExists $0 powershell_found
-  StrCpy $0 "$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe"
-  IfFileExists $0 powershell_found
+  ; Find PowerShell. The 64 bit one is wanted, because bcdedit.exe is a 64 bit
+  ; program. The script starts itself again as a 64 bit process when it has
+  ; to, so the path that is found here is a first try.
+  Call Locate-PowerShell
+  ${If} $0 == ""
+    MessageBox MB_ICONSTOP "Windows PowerShell was not found on this machine, so the installer cannot run.$\r$\n$\r$\nThe log file is here: $INSTDIR\${LOGFILE}" /SD IDOK
+    Abort
+  ${EndIf}
 
-  MessageBox MB_ICONSTOP "Windows PowerShell was not found on this machine, so the installer cannot run.$\r$\n$\r$\nThe log file is here: $INSTDIR\${LOGFILE}" /SD IDOK
-  Abort
-
-  powershell_found:
+  ; Say which PowerShell was taken, so that the log says it too.
+  ClearErrors
+  FileOpen $2 "$INSTDIR\${LOGFILE}" a
+  IfErrors powershell_logged
+    FileSeek $2 0 END
+    FileWrite $2 "PowerShell: $0$\r$\n"
+  FileClose $2
+  powershell_logged:
 
   ; Run the installer. It writes everything it does into the log file.
   ; -Yes keeps it from waiting for a key press in a window that may be
@@ -216,19 +263,18 @@ Section "Install"
 SectionEnd
 
 Section "Uninstall"
+  ; The registry is read and written in the 64 bit view, the same as the
+  ; installer does it.
+  SetRegView 64
+
   ; Ask the PowerShell installer to reverse what it did: remove the boot
   ; entry and the staged files on the EFI partition.
-  StrCpy $0 "$SYSDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe"
-  IfFileExists $0 uninstaller_found
-  StrCpy $0 "$SYSDIR\WindowsPowerShell\v1.0\powershell.exe"
-  IfFileExists $0 uninstaller_found
-  StrCpy $0 "$WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
-  IfFileExists $0 uninstaller_found
+  Call un.Locate-PowerShell
+  ${If} $0 == ""
+    MessageBox MB_ICONSTOP "Windows PowerShell was not found on this machine, so the uninstaller cannot run. The boot entry and the files on the EFI system partition are still there." /SD IDOK
+    Abort
+  ${EndIf}
 
-  MessageBox MB_ICONSTOP "Windows PowerShell was not found on this machine, so the uninstaller cannot run. The boot entry and the files on the EFI system partition are still there." /SD IDOK
-  Abort
-
-  uninstaller_found:
   IfFileExists "$INSTDIR\Install-GpuUnlock.ps1" 0 +2
     ExecWait '"$0" -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\Install-GpuUnlock.ps1" -Action Uninstall' $2
 

@@ -418,6 +418,16 @@ jobs:
             if ($text -notlike "*$needle*") { throw "the log does not mention: $needle" }
           }
 
+          # bcdedit.exe is a 64 bit program and there is no 32 bit copy of it,
+          # so the installer has to run in a 64 bit PowerShell. A 32 bit one
+          # cannot find the command at all, and the installation stops at the
+          # boot entry. This is what the first user of the installer ran
+          # into, so the log has to say which process did the work.
+          if ($text -notlike '*64 bit process*') {
+            throw 'the installer did not run in a 64 bit process'
+          }
+          Write-Host 'OK   the installer ran in a 64 bit process'
+
           # The lines that the installer itself wrote have to be in there.
           # They used to be written over each other, because FileOpen in
           # append mode leaves the position at the start of the file.

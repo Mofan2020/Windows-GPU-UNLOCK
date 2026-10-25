@@ -53,6 +53,23 @@ if (-not $LogPath) {
     $LogPath = Join-Path ([System.IO.Path]::GetTempPath()) 'WindowsGPUUnlock-install.log'
 }
 
+# The script needs a 64 bit process, because bcdedit.exe is a 64 bit program.
+# The packaged installer is a 32 bit program, so the PowerShell it starts can
+# be the 32 bit one, in which case bcdedit cannot be found at all. The check
+# is here, before the log is opened, so that the log belongs to the process
+# that does the work.
+. (Join-Path $PSScriptRoot 'Installer-Common.ps1')
+
+$forwarded = @()
+if ($Uninstall) { $forwarded += '-Uninstall' }
+if ($Yes) { $forwarded += '-Yes' }
+if ($Silent) { $forwarded += '-Silent' }
+if ($CheckOnly) { $forwarded += '-CheckOnly' }
+if ($PayloadDirectory) { $forwarded += @('-PayloadDirectory', $PayloadDirectory) }
+if ($AssetDirectory) { $forwarded += @('-AssetDirectory', $AssetDirectory) }
+if ($LogPath) { $forwarded += @('-LogPath', $LogPath) }
+Restart-As64Bit -ScriptPath $PSCommandPath -Arguments $forwarded
+
 # The log is written first, so that a failure while loading the other
 # scripts is in there as well.
 #
@@ -81,6 +98,8 @@ if ($transcript -and $preamble) {
     Write-Host $preamble.TrimEnd()
     Write-Host ''
 }
+Write-Host ("PowerShell: {0} process" -f (Get-ProcessArchitecture))
+Write-Host ("PowerShell: {0}" -f $PSVersionTable.PSVersion)
 
 function Test-Administrator {
     <#

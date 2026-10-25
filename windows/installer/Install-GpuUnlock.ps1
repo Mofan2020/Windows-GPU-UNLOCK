@@ -47,6 +47,34 @@ $script:StateFile = Join-Path $script:StateDirectory 'install-state.json'
 $script:EfiRelativeDirectory = '\EFI\WindowsGPUUnlock'
 $script:EfiApplicationName = 'UNLOCK.EFI'
 
+function Get-BcdEditPath {
+    <#
+    .SYNOPSIS
+        The path of bcdedit.exe.
+    .DESCRIPTION
+        bcdedit.exe is a 64 bit program and there is no 32 bit copy of it. A
+        32 bit process cannot see it in the system directory, because the
+        system directory of such a process points at the 32 bit one, and the
+        command is then not found at all. The Sysnative alias reaches the
+        64 bit one from a 32 bit process.
+    #>
+    $candidates = @(
+        (Join-Path $env:SystemRoot 'System32\bcdedit.exe'),
+        (Join-Path $env:SystemRoot 'Sysnative\bcdedit.exe')
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate) {
+            return $candidate
+        }
+    }
+    $found = Get-Command bcdedit -ErrorAction SilentlyContinue
+    if ($null -ne $found) {
+        return $found.Source
+    }
+    throw ("bcdedit.exe was not found. It is a 64 bit program, and a 32 bit process cannot run it." +
+        " Looked in: $($candidates -join ', ')")
+}
+
 function Invoke-Bcd {
     <#
     .SYNOPSIS
@@ -54,9 +82,22 @@ function Invoke-Bcd {
     #>
     param([Parameter(Mandatory)][string[]]$Arguments)
 
-    $output = & bcdedit @Arguments 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "bcdedit $($Arguments -join ' ') failed:`n$($output -join "`r`n")"
+    $bcdedit = Get-BcdEditPath
+
+    # bcdedit writes to its error stream when it does not like something.
+    # That is read here instead of being turned into a terminating error, so
+    # that the reason it gives ends up in the log.
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = & $bcdedit @Arguments 2>&1
+        $code = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+
+    if ($code -ne 0) {
+        throw "bcdedit $($Arguments -join ' ') failed (exit $code):`n$($output -join "`r`n")"
     }
     return ($output -join "`r`n")
 }
@@ -109,6 +150,29 @@ function Install-GpuUnlock {
     $espLetter = Enable-EspDriveLetter -Esp $esp
     $espPath = $espLetter + ':\'
     $letterAdded = [string]::IsNullOrEmpty([string]$esp.DriveLetter)
+
+    # The record of what was changed is written before anything is changed,
+    # so that a failure later on still leaves a record that the uninstaller
+    # can use. The drive letter is the first thing that is given to the
+    # machine, and it is the one that has to be taken back.
+    New-Item -ItemType Directory -Path $script:StateDirectory -Force | Out-Null
+    $partialState = [ordered]@{
+        Version            = 1
+        Action             = 'staging'
+        EntryId            = ''
+        EntryDescription   = $Description
+        EspPath            = $espPath
+        EspGuid            = $esp.Guid
+        EspDriveLetter     = $espLetter
+        EspLetterAdded     = $letterAdded
+        EspDiskNumber      = $esp.DiskNumber
+        EspPartitionNumber = $esp.PartitionNumber
+        StagingRoot        = (Join-Path $espPath 'EFI\WindowsGPUUnlock')
+        BackupRoot         = ''
+        BootOrderBefore    = @()
+        InstalledUtc       = [DateTime]::UtcNow.ToString('o')
+    }
+    $partialState | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $script:StateFile -Encoding UTF8
 
     $target = Test-UnlockTarget
     if (-not $target.Supported) {
@@ -181,7 +245,7 @@ function Install-GpuUnlock {
     # anything goes wrong later.
     $backupRoot = Join-Path $script:StateDirectory ('backups\' + (Get-Date -Format 'yyyyMMdd-HHmmssfff'))
     New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
-    & bcdedit /export (Join-Path $backupRoot 'BCD-export') | Out-Null
+    & (Get-BcdEditPath) /export (Join-Path $backupRoot 'BCD-export') | Out-Null
     Write-Ok ("Boot configuration exported to {0}" -f $backupRoot)
 
     $existing = Get-BcdEntryId -Description $Description
@@ -274,7 +338,13 @@ function Uninstall-GpuUnlock {
         return
     }
     $state = Get-Content -LiteralPath $script:StateFile -Raw | ConvertFrom-Json
-    Write-Ok ("Installation record found: entry {0} on {1}" -f $state.EntryId, $state.espPath)
+    if ($state.EntryId) {
+        Write-Ok ("Installation record found: entry {0} on {1}" -f $state.EntryId, $state.espPath)
+    } else {
+        # The record is written before the machine is changed, so a run that
+        # stopped halfway leaves one behind without a boot entry in it.
+        Write-Ok ("Installation record found: the run stopped before the boot entry was made, on {0}" -f $state.espPath)
+    }
 
     Write-Step 'Removing the boot entry'
 
@@ -336,6 +406,16 @@ function Uninstall-GpuUnlock {
 . (Join-Path $PSScriptRoot 'Detect-Hardware.ps1')
 . (Join-Path $PSScriptRoot 'Test-Preconditions.ps1')
 . (Join-Path $PSScriptRoot 'Get-FirmwareAssets.ps1')
+
+# bcdedit.exe is a 64 bit program, so this script needs a 64 bit process. The
+# uninstaller of the packaged installer is a 32 bit program and may start the
+# 32 bit PowerShell, in which case this is where the work moves to the 64 bit
+# one.
+$forwarded = @('-Action', $Action)
+if ($PayloadDirectory) { $forwarded += @('-PayloadDirectory', $PayloadDirectory) }
+if ($AssetDirectory) { $forwarded += @('-AssetDirectory', $AssetDirectory) }
+if ($BootEntryName) { $forwarded += @('-BootEntryName', $BootEntryName) }
+Restart-As64Bit -ScriptPath $PSCommandPath -Arguments $forwarded
 
 Write-Host ''
 Write-Host 'Windows GPU UNLOCK installer' -ForegroundColor White

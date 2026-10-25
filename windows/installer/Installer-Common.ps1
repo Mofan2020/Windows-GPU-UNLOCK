@@ -11,6 +11,87 @@
 
 Set-StrictMode -Version Latest
 
+function Quote-ProcessArgument {
+    <#
+    .SYNOPSIS
+        Puts one argument in the form that a program on Windows reads.
+    #>
+    param([string]$Value)
+
+    if ($null -eq $Value) { return '""' }
+    if ($Value -notmatch '[\s"]') {
+        return $Value
+    }
+    $escaped = $Value -replace '(\\*)"', '$1$1\"'
+    $escaped = $escaped -replace '(\\+)$', '$1$1'
+    return '"' + $escaped + '"'
+}
+
+function Get-ProcessArchitecture {
+    <#
+    .SYNOPSIS
+        Whether this process is a 64 bit one.
+    #>
+    if ([Environment]::Is64BitProcess) {
+        return '64 bit'
+    }
+    return '32 bit'
+}
+
+function Restart-As64Bit {
+    <#
+    .SYNOPSIS
+        Starts this script again as a 64 bit process, if it is not one.
+
+    .DESCRIPTION
+        bcdedit.exe is a 64 bit program and there is no 32 bit copy of it. A
+        32 bit process cannot see it, because the system directory in the
+        path of such a process points at the 32 bit one, and the command is
+        then not found at all.
+
+        The 64 bit PowerShell is reached through the Sysnative alias, which
+        a 32 bit process may use to get at the 64 bit system directory.
+
+        The function does not return when it starts the other process: the
+        exit code of that process becomes the exit code of this one.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$ScriptPath,
+        [string[]]$Arguments = @()
+    )
+
+    if ([Environment]::Is64BitProcess) {
+        return $false
+    }
+
+    $candidates = @(
+        (Join-Path $env:SystemRoot 'Sysnative\WindowsPowerShell\v1.0\powershell.exe')
+    )
+    foreach ($candidate in $candidates) {
+        if (-not (Test-Path -LiteralPath $candidate)) { continue }
+
+        $all = @(
+            '-NoProfile'
+            '-ExecutionPolicy'
+            'Bypass'
+            '-File'
+            (Quote-ProcessArgument $ScriptPath)
+        ) + @($Arguments | ForEach-Object { Quote-ProcessArgument $_ })
+
+        Write-Host "This process is a 32 bit one, so it is started again as a 64 bit one."
+        try {
+            $process = Start-Process -FilePath $candidate -ArgumentList $all -Wait -PassThru -NoNewWindow
+        } catch {
+            throw "The 64 bit PowerShell could not be started: $($_.Exception.Message)"
+        }
+        exit $process.ExitCode
+    }
+
+    throw ("The 64 bit PowerShell was not found, so the installation cannot continue." +
+        " bcdedit.exe is a 64 bit program, and a 32 bit process cannot run it." +
+        " Looked in: $($candidates -join ', ')")
+}
+
 function Write-Step {
     param([string]$Message)
     Write-Host ''

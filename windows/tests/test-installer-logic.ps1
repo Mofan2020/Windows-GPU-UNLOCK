@@ -375,6 +375,49 @@ Assert-Contains $source 'WGPU-RESULT' 'the entry point writes a result marker'
 Assert-Contains $source 'Start-Transcript' 'the entry point writes a log file'
 Assert-Contains $source 'Stop-Transcript' 'the entry point closes the log file'
 
+Write-Host 'The 64 bit process'
+
+# bcdedit.exe is a 64 bit program and there is no 32 bit copy of it. A 32 bit
+# process cannot see it, because the system directory of such a process
+# points at the 32 bit one, and the command is then not found at all. The
+# installer is a 32 bit program, so the scripts have to make sure that they
+# run in a 64 bit process.
+. (Join-Path $root 'windows/installer/Installer-Common.ps1')
+
+Assert-True ($null -ne (Get-Command Restart-As64Bit -ErrorAction SilentlyContinue)) 'the guard is a function of its own'
+Assert-True ($null -ne (Get-Command Get-ProcessArchitecture -ErrorAction SilentlyContinue)) 'the architecture helper is a function of its own'
+
+$architecture = Get-ProcessArchitecture
+Assert-True ($architecture -in @('32 bit', '64 bit')) 'the architecture is named'
+Write-Host "    this test runs in a $architecture process"
+
+# An argument with a space in it has to reach the program as one argument.
+Assert-Equal 'plain' (Quote-ProcessArgument 'plain') 'a plain argument is left alone'
+Assert-Equal '"with space"' (Quote-ProcessArgument 'with space') 'an argument with a space is quoted'
+Assert-Equal '"C:\dir with space\\"' (Quote-ProcessArgument 'C:\dir with space\') 'a trailing backslash is doubled in a quoted argument'
+
+# The entry point has to ask for the 64 bit process before it opens the log,
+# so that the log belongs to the process that does the work.
+$entrySource = Get-Content (Join-Path $root 'windows/installer/Invoke-Installer.ps1') -Raw
+$guardAt = $entrySource.IndexOf('Restart-As64Bit')
+$transcriptAt = $entrySource.IndexOf('Start-Transcript')
+Assert-True ($guardAt -ge 0) 'the entry point asks for a 64 bit process'
+Assert-True ($transcriptAt -ge 0) 'the entry point opens a log'
+Assert-True ($guardAt -lt $transcriptAt) 'the guard comes before the log is opened'
+
+# bcdedit is called by its path, and not by its name, because the name is
+# only found in a 64 bit process.
+$installSource = Get-Content (Join-Path $root 'windows/installer/Install-GpuUnlock.ps1') -Raw
+Assert-Contains $installSource 'Get-BcdEditPath' 'bcdedit is found by its path'
+Assert-True (-not $installSource.Contains('& bcdedit ')) 'bcdedit is not called by its name'
+Assert-Contains $installSource 'Sysnative\bcdedit.exe' 'the 64 bit bcdedit is looked for'
+
+# The registry is read and written in the 64 bit view on both sides, so
+# that the 32 bit installer and the 64 bit script see the same keys.
+$nsiSource = Get-Content (Join-Path $root 'windows/installer/WindowsGPUUnlock.nsi') -Raw
+Assert-Contains $nsiSource 'SetRegView 64' 'the installer uses the 64 bit registry view'
+Assert-Contains $nsiSource 'Locate-PowerShell' 'the installer looks for the 64 bit PowerShell'
+
 Write-Host 'The log that the installer writes'
 
 # The installer writes the first lines of the log itself, and the script
@@ -388,7 +431,7 @@ Assert-True (-not $nsi.Contains('`r`n')) 'the installer script has no backtick l
 Assert-True ($nsi.Contains('$\r$\n')) 'the installer script writes real line endings'
 
 $openings = [regex]::Matches($nsi, 'FileOpen \$2 "\$INSTDIR\\\$\{LOGFILE\}" a')
-Assert-Equal 2 $openings.Count 'the log is opened in append mode twice'
+Assert-True ($openings.Count -ge 2) 'the log is opened in append mode more than once'
 foreach ($opening in $openings) {
     $after = $nsi.Substring($opening.Index + $opening.Length)
     $write = $after.IndexOf('FileWrite')
