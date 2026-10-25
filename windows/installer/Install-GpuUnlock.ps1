@@ -151,6 +151,20 @@ function Install-GpuUnlock {
     $espPath = $espLetter + ':\'
     $letterAdded = [string]::IsNullOrEmpty([string]$esp.DriveLetter)
 
+    $stagingRoot = Join-Path $espPath 'EFI\WindowsGPUUnlock'
+    $stagingAssets = Join-Path $stagingRoot 'ASSETS'
+
+    # A run that stopped before it wrote its record leaves the files on the
+    # partition and the drive letter with it, but no record. When the files
+    # are there and there is no record, the letter belongs to that run, and
+    # it has to be taken back as well.
+    if (-not $letterAdded -and
+        -not (Test-Path -LiteralPath $script:StateFile) -and
+        (Test-Path -LiteralPath $stagingRoot)) {
+        $letterAdded = $true
+        Write-Note 'The files of an earlier run are on the partition, so the drive letter it gave is taken back when the installation is removed.'
+    }
+
     # The record of what was changed is written before anything is changed,
     # so that a failure later on still leaves a record that the uninstaller
     # can use. The drive letter is the first thing that is given to the
@@ -209,9 +223,6 @@ function Install-GpuUnlock {
     Write-Ok 'All five firmware assets match their pinned SHA-256'
 
     Write-Step 'Staging the files on the EFI system partition'
-
-    $stagingRoot = Join-Path $espPath 'EFI\WindowsGPUUnlock'
-    $stagingAssets = Join-Path $stagingRoot 'ASSETS'
 
     if (Test-Path -LiteralPath $stagingRoot) {
         Remove-Item -LiteralPath $stagingRoot -Recurse -Force

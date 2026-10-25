@@ -412,6 +412,11 @@ Assert-Contains $installSource 'Get-BcdEditPath' 'bcdedit is found by its path'
 Assert-True (-not $installSource.Contains('& bcdedit ')) 'bcdedit is not called by its name'
 Assert-Contains $installSource 'Sysnative\bcdedit.exe' 'the 64 bit bcdedit is looked for'
 
+# A run that stopped halfway leaves the files on the partition and the drive
+# letter with it, but no record. The letter has to be given back then too,
+# so the installer looks for that situation and takes the letter over.
+Assert-Contains $installSource 'The files of an earlier run are on the partition' 'the installer takes over the drive letter of an earlier run'
+
 # The registry is read and written in the 64 bit view on both sides, so
 # that the 32 bit installer and the 64 bit script see the same keys.
 $nsiSource = Get-Content (Join-Path $root 'windows/installer/WindowsGPUUnlock.nsi') -Raw
