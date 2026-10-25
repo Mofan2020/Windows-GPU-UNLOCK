@@ -247,6 +247,12 @@ function Expand-InstallerPayload {
 
 $script:BcdIdentifierPattern = '\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}'
 
+# bcdedit does not always report a failure in its exit code. It writes the
+# reason into its output and returns zero all the same, so the output has to
+# be read as well. These are the ways in which it says that a command did not
+# do what it was asked to do.
+$script:BcdFailurePattern = '(?im)^(an error occurred|the request is not supported|access is denied|the operation was not completed)|specified is not valid\.'
+
 # An object in a dump starts with its name, then a line of dashes, then its
 # properties. The objects are separated by an empty line.
 $script:BcdObjectPattern = '(?ms)^(?<name>[^\r\n]+)\r?\n-{3,}[ \t]*\r?\n(?<body>.*?)(?=\r?\n[ \t]*\r?\n|\z)'
@@ -292,7 +298,8 @@ function Invoke-Bcd {
     #>
     param(
         [Parameter(Mandatory)][string[]]$Arguments,
-        [switch]$LogOutput
+        [switch]$LogOutput,
+        [switch]$IgnoreFailure
     )
 
     $bcdedit = Get-BcdEditPath
@@ -316,7 +323,12 @@ function Invoke-Bcd {
         Write-Host $text
     }
 
-    if ($code -ne 0) {
+    # A failure is reported in the exit code and in the output. bcdedit
+    # returns zero for some of them, so the output is what decides.
+    if ($code -ne 0 -or $text -match $script:BcdFailurePattern) {
+        if ($IgnoreFailure) {
+            return $null
+        }
         throw "bcdedit $($Arguments -join ' ') failed (exit $code):`r`n$text"
     }
     return $text

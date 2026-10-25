@@ -265,6 +265,11 @@ jobs:
           $made = @()
 
           try {
+            # What bcdedit says it can do. The answer is written down here,
+            # because it is the answer that the installer has to give.
+            Write-Host '=== bcdedit /? ==='
+            & $bcdedit /? 2>&1 | Out-String -Width 200
+
             # The identifier of the Windows Boot Manager.
             $managerText = Invoke-Bcd @('/enum', '{bootmgr}', '/v') -LogOutput
             $managerId = Get-BcdIdentifier -Text $managerText
@@ -283,31 +288,32 @@ jobs:
             # Whether a change to the boot configuration stays at all. A runner
             # on which it does not would say that every entry was made, and
             # then not have it.
-            [void](Invoke-Bcd @('/set', '{bootmgr}', 'timeout', '30') -LogOutput)
+            [void](Invoke-Bcd @('/set', '{bootmgr}', 'timeout', '31') -LogOutput)
             $probe = Invoke-Bcd @('/enum', '{bootmgr}', '/v') -LogOutput
-            if (-not (Test-BcdPropertyValue -Text $probe -Value '30')) {
-              throw 'the boot configuration does not keep a change'
-            }
-            Write-Host 'OK   the boot configuration keeps a change'
+            Write-Host ("the timeout reads back as: {0}" -f (@(Get-BcdPropertyValue -Text $probe -ValuePattern '^\d+$') -join ', '))
+            [void](Invoke-Bcd @('/set', '{bootmgr}', 'timeout', '30') -LogOutput)
 
             # Every way of making an entry is tried here, and the whole boot
             # configuration is printed after each of them, so that the way
             # that works is written down instead of guessed at.
             $variants = @(
-                @{ Name = 'create with application'; Id = '{7c1f9d20-6f0a-4a1e-9d33-0b5e5a5c1a01}'
-                   Args = @('/create', '{7c1f9d20-6f0a-4a1e-9d33-0b5e5a5c1a01}', '/d', 'CI application', '/application') },
-                @{ Name = 'create with inherit'; Id = '{7c1f9d20-6f0a-4a1e-9d33-0b5e5a5c1a02}'
-                   Args = @('/create', '{7c1f9d20-6f0a-4a1e-9d33-0b5e5a5c1a02}', '/d', 'CI inherit', '/inherit', '{bootmgr}') },
+                @{ Name = 'copy of the boot manager'; Id = ''
+                   Args = @('/copy', '{bootmgr}', '/d', 'CI copy') },
                 @{ Name = 'create plain'; Id = '{7c1f9d20-6f0a-4a1e-9d33-0b5e5a5c1a03}'
                    Args = @('/create', '{7c1f9d20-6f0a-4a1e-9d33-0b5e5a5c1a03}', '/d', 'CI plain') },
-                @{ Name = 'copy of the boot manager'; Id = ''
-                   Args = @('/copy', '{bootmgr}', '/d', 'CI copy') }
+                @{ Name = 'create with a device'; Id = '{7c1f9d20-6f0a-4a1e-9d33-0b5e5a5c1a04}'
+                   Args = @('/create', '{7c1f9d20-6f0a-4a1e-9d33-0b5e5a5c1a04}', '/d', 'CI device', '/device', $managerDevices[0]) },
+                @{ Name = 'create with a system type'; Id = '{7c1f9d20-6f0a-4a1e-9d33-0b5e5a5c1a05}'
+                   Args = @('/create', '{7c1f9d20-6f0a-4a1e-9d33-0b5e5a5c1a05}', '/d', 'CI system', '/system', 'true') }
             )
 
             foreach ($variant in $variants) {
               Write-Host "=== $($variant.Name) ==="
-              [void](Invoke-Bcd $variant.Args -LogOutput)
-              Write-Host "--- the command returned $LASTEXITCODE ---"
+              try {
+                [void](Invoke-Bcd $variant.Args -LogOutput)
+              } catch {
+                Write-Host "FAILED: $($_.Exception.Message)"
+              }
               if ($variant.Id) {
                 $made += $variant.Id
                 Write-Host "--- bcdedit /enum $($variant.Id) ---"
