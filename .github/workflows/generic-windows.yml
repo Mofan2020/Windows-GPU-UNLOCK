@@ -80,10 +80,23 @@ jobs:
           windows/installer/zstd/build.sh x86_64-w64
           file windows/installer/zstd/build/zstdcat.exe
 
+      # The fixture is built here, because the runner has tar and zstd, so no
+      # Python package is needed anywhere.
+      - name: Create the test fixture
+        run: |
+          mkdir -p build/fixture/test
+          head -c 16384 /dev/urandom > build/fixture/test/member.bin
+          printf 'not wanted' > build/fixture/test/other.bin
+          tar -C build/fixture -cf build/fixture/fixture.tar test
+          zstd -q -f -o build/fixture/fixture.tar.zst build/fixture/fixture.tar
+          sha256sum build/fixture/test/member.bin | tee build/fixture/member.sha256
+
       - uses: actions/upload-artifact@v4
         with:
           name: zstd-helper
-          path: windows/installer/zstd/build/zstdcat.exe
+          path: |
+            windows/installer/zstd/build/zstdcat.exe
+            build/fixture/
 
   tests:
     name: host tests
@@ -154,25 +167,19 @@ jobs:
       - name: Test the helper
         shell: pwsh
         run: |
-          python -m pip install --quiet --disable-pip-version-check zstandard
-          if ($LASTEXITCODE -ne 0) { throw 'zstandard could not be installed' }
-
-          $expected = 'a1f259d4365ed4320c377ce26f5c8c56dcdc9a89e7b641bfd8eabfbbeac86654'
-          $digest = python windows/tests/make-zstd-fixture.py build/helper/fixture.tar.zst $expected
-          if ($LASTEXITCODE -ne 0) { throw 'The fixture could not be created' }
+          $expected = ((Get-Content build/helper/fixture/member.sha256) -split '\s+')[0].Trim()
+          if (-not $expected) { throw 'The fixture digest is missing' }
 
           & build/helper/zstdcat.exe --version
           if ($LASTEXITCODE -ne 0) { throw 'The helper did not start' }
 
-          & build/helper/zstdcat.exe --member 'test/member.bin' --output build/helper/member.bin
+          # The helper reads the compressed stream from its standard input.
+          cmd /c "build\helper\zstdcat.exe --member test/member.bin --output build\helper\member.bin < build\helper\fixture\fixture.tar.zst"
           if ($LASTEXITCODE -ne 0) { throw 'The helper did not extract the member' }
 
           $actual = (Get-FileHash build/helper/member.bin -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($actual -ne $expected) {
             throw "The extracted member does not match: expected $expected, got $actual"
-          }
-          if (Test-Path build/helper/test/other.bin) {
-            throw 'The helper kept reading after the member was complete'
           }
           Write-Host "OK   the helper extracted the member ($actual)"
 

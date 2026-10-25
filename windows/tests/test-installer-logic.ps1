@@ -55,6 +55,16 @@ function Assert-Contains {
     }
 }
 
+# Every installer script has to parse. This is checked here as well, because
+# a parse error in a script that this test does not call would otherwise only
+# show up in the continuous integration.
+foreach ($script in (Get-ChildItem (Join-Path $root 'windows/installer') -Filter *.ps1)) {
+    $parseErrors = $null
+    $null = [System.Management.Automation.Language.Parser]::ParseFile($script.FullName, [ref]$null, [ref]$parseErrors)
+    Assert-True ($null -eq $parseErrors -or $parseErrors.Count -eq 0) `
+        ("{0} parses: {1}" -f $script.Name, (($parseErrors | ForEach-Object { $_.Message }) -join '; '))
+}
+
 # ---------------------------------------------------------------------------
 # Stubs for the Windows specific commands.
 # ---------------------------------------------------------------------------
@@ -236,6 +246,24 @@ $script:FakeHiberboot = 0
 $result = Test-InstallPreconditions
 Assert-True $result.CanInstall 'A prepared machine is still allowed'
 Assert-True (-not $result.FastStartup) 'The Fast Startup flag is cleared'
+
+Write-Host 'The firmware boot order'
+
+$dump = @"
+Firmware Boot Manager
+---------------------
+identifier              {fwbootmgr}
+bootsequence            {9dea862c-5cdd-4e70-acc1-f32b344d4795}
+displayorder            {bootmgr}
+                        {9dea862c-5cdd-4e70-acc1-f32b344d4795}
+                        {11111111-2222-3333-4444-555555555555}
+description             Windows Boot Manager
+"@
+$order = @(Get-BcdDisplayOrder $dump)
+Assert-Equal 3 $order.Count 'The firmware boot order has three entries'
+Assert-Equal '{bootmgr}' $order[0] 'The Windows Boot Manager is first'
+Assert-Equal '{11111111-2222-3333-4444-555555555555}' $order[2] 'The last entry is read'
+Assert-Equal 0 @(Get-BcdDisplayOrder 'nothing here').Count 'A dump without an order gives no entries'
 
 Write-Host 'The EFI system partition'
 

@@ -189,10 +189,21 @@ function Install-GpuUnlock {
         throw "A boot entry named '$Description' already exists. Remove it first, or choose another name."
     }
 
-    $before = Invoke-Bcd @('/enum', '{fwbootmgr}')
-    $beforeOrder = [regex]::Matches($before, '(?m)^\s*description\s+(.+?)\s*$') | ForEach-Object { $_.Groups[1].Trim() }
+    $managerText = Invoke-Bcd @('/enum', '{bootmgr}')
+    $managerId = $null
+    if ($managerText -match '(?m)^\s*identifier\s+(\{[0-9a-fA-F-]{36}\})\s*$') {
+        $managerId = $Matches[1]
+    }
+    if (-not $managerId) {
+        throw 'The identifier of the Windows Boot Manager could not be read'
+    }
 
-    $manager = Invoke-Bcd @('/enum', '{bootmgr}')
+    # The boot order before the change, so that it can be restored.
+    $beforeOrder = @(Get-BcdDisplayOrder (Invoke-Bcd @('/enum', '{fwbootmgr}')))
+    if ($beforeOrder.Count -eq 0) {
+        $beforeOrder = @($managerId)
+    }
+
     [void](Invoke-Bcd @('/copy', '{bootmgr}', '/d', $Description))
     $newId = Get-BcdEntryId -Description $Description
     if (-not $newId) {
@@ -200,20 +211,21 @@ function Install-GpuUnlock {
     }
 
     # Point the entry at the staged application on the EFI partition.
-    [void](Invoke-Bcd @('/set', $newId, 'device', "partition=$espLetter:"))
+    [void](Invoke-Bcd @('/set', $newId, 'device', ('partition=' + $espLetter + ':')))
     [void](Invoke-Bcd @('/set', $newId, 'path', ($script:EfiRelativeDirectory + '\' + $script:EfiApplicationName)))
 
-    # Put the entry first in the firmware boot order, so the unlock runs
-    # before the NVIDIA driver binds the card.
-    $managerText = Invoke-Bcd @('/enum', '{bootmgr}')
-    $managerId = $null
-    if ($managerText -match '(?m)^\s*identifier\s+(\{[0-9a-fA-F-]{36}\})\s*$') {
-        $managerId = $Matches[1]
-    }
-    [void](Invoke-Bcd @('/set', '{fwbootmgr}', 'bootsequence', $newId))
+    # Put the entry first in the firmware boot order, so that the unlock runs
+    # before the NVIDIA driver binds the card. The Windows Boot Manager stays
+    # in the order behind it, so the machine still boots if the application
+    # returns without starting Windows.
+    $newOrder = @($newId) + @($beforeOrder | Where-Object { $_ -ne $newId })
+    [void](Invoke-Bcd (@('/set', '{fwbootmgr}', 'displayorder') + $newOrder))
 
     # Read the result back.
-    $after = Invoke-Bcd @('/enum', '{fwbootmgr}')
+    $afterOrder = @(Get-BcdDisplayOrder (Invoke-Bcd @('/enum', '{fwbootmgr}')))
+    if (($afterOrder -join ',') -ne ($newOrder -join ',')) {
+        throw "The firmware boot order does not match the plan. Expected $($newOrder -join ','), found $($afterOrder -join ',')"
+    }
     $afterText = Invoke-Bcd @('/enum', $newId)
     if ($afterText -notmatch ('(?mi)^path\s+' + [regex]::Escape(($script:EfiRelativeDirectory + '\' + $script:EfiApplicationName)) + '\s*$')) {
         throw 'The boot entry does not point at the staged application'
@@ -236,6 +248,7 @@ function Install-GpuUnlock {
         EspPartitionNumber = $esp.PartitionNumber
         StagingRoot       = $stagingRoot
         BackupRoot        = $backupRoot
+        BootOrderBefore   = @($beforeOrder)
         InstalledUtc      = [DateTime]::UtcNow.ToString('o')
     }
     $state | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $script:StateFile -Encoding UTF8
@@ -267,8 +280,24 @@ function Uninstall-GpuUnlock {
 
     $existing = Get-BcdEntryId -Description $Description
     if ($existing) {
-        [void](Invoke-Bcd @('/delete', $existing))
+        # Put the boot order back the way it was before the installation.
+        $current = @(Get-BcdDisplayOrder (Invoke-Bcd @('/enum', '{fwbootmgr}')))
+        $restored = @($current | Where-Object { $_ -ne $existing })
+        $original = @()
+        if ($state.bootOrderBefore) {
+            $original = @($state.bootOrderBefore | Where-Object { $_ -ne $existing })
+        }
+        if ($original.Count -gt 0) {
+            [void](Invoke-Bcd (@('/set', '{fwbootmgr}', 'displayorder') + $original))
+        } elseif ($restored.Count -gt 0) {
+            [void](Invoke-Bcd (@('/set', '{fwbootmgr}', 'displayorder') + $restored))
+        }
         Write-Ok "Boot entry '$Description' removed"
+
+        $after = @(Get-BcdDisplayOrder (Invoke-Bcd @('/enum', '{fwbootmgr}')))
+        if ($after -contains $existing) {
+            throw 'The boot entry is still in the firmware boot order'
+        }
     } else {
         Write-Note "The boot entry '$Description' was already gone"
     }

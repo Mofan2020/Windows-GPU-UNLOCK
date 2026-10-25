@@ -31,3 +31,21 @@ function Write-Fail {
     param([string]$Message)
     Write-Host "    $Message" -ForegroundColor Red
 }
+
+function Get-BcdDisplayOrder {
+    <#
+    .SYNOPSIS
+        Reads the firmware boot order from a boot configuration dump.
+    .DESCRIPTION
+        The order lives in the displayorder element of the firmware boot
+        manager. It is the order in which the boot manager tries the entries,
+        so the unlock application is put in front of the Windows Boot Manager.
+    #>
+    param([Parameter(Mandatory)][string]$Text)
+
+    $match = [regex]::Match($Text, '(?ms)^displayorder\s+(.*?)(?=\r?\n\S|\z)')
+    if (-not $match.Success) {
+        return @()
+    }
+    return @([regex]::Matches($match.Groups[1].Value, '\{(?:bootmgr|[0-9a-f-]{36})\}') | ForEach-Object { $_.Value })
+}
