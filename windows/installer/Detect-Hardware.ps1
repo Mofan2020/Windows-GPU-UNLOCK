@@ -131,6 +131,11 @@ function Get-DisplayAdapter {
             Status         = $video.Status
             IsNvidia       = ($null -ne $vendorId -and $vendorId -eq 0x10de)
             IsSupported    = ($null -ne $deviceId -and $script:SupportedDeviceIds -contains $deviceId)
+            # A virtual display adapter, such as the one a remote desktop
+            # program installs, has no place on the PCI bus. Only a real
+            # adapter can take the screen over from the card that is
+            # unlocked.
+            IsPhysical     = ($pnp -like 'PCI\*')
         }
     }
 

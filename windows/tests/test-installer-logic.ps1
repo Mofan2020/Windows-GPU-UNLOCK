@@ -165,6 +165,19 @@ function New-FakeAdapter {
     }
 }
 
+# A virtual display adapter, such as the one a remote desktop program
+# installs. It has no place on the PCI bus.
+function New-FakeVirtualAdapter {
+    param([string]$Name)
+    return [pscustomobject]@{
+        Name           = $Name
+        PNPDeviceID    = 'ROOT\DISPLAY\0000'
+        DriverVersion  = '1.0.0.0'
+        AdapterRAM     = 0
+        Status         = 'OK'
+    }
+}
+
 Write-Host 'Hardware detection'
 
 $script:FakeVideoControllers = @()
@@ -209,6 +222,18 @@ $script:FakeVideoControllers = @(
 $result = Test-UnlockTarget
 Assert-True (-not $result.Supported) 'Two supported cards are refused'
 Assert-Contains $result.Reason 'More than one supported NVIDIA card' 'The reason explains the duplicate'
+
+# A virtual display adapter has no place on the PCI bus, so it cannot take
+# the screen over from the card that is unlocked.
+$script:FakeVideoControllers = @(
+    New-FakeAdapter -Name 'NVIDIA GeForce RTX 3060' -Vendor '10DE' -Device '2504'
+    New-FakeVirtualAdapter -Name 'GameViewer Virtual Display Adapter'
+)
+$result = Test-UnlockTarget
+Assert-True $result.Supported 'A machine with a virtual display adapter next to the card is accepted'
+$physical = @($result.Adapters | Where-Object { $_.IsPhysical })
+Assert-Equal 1 $physical.Count 'The virtual adapter is not a physical one'
+Assert-Equal 'NVIDIA GeForce RTX 3060' $physical[0].Adapter 'The card itself is the physical one'
 
 # ---------------------------------------------------------------------------
 # System preconditions.

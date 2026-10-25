@@ -9,3 +9,5 @@ EFI_STATUS GuLoadAssets(VOID);
 VOID GuReleaseAssets(VOID);
 BOOLEAN GuLogReady(VOID);
 VOID GuConsole(const char *Text);
+VOID GuIoSilenceConsole(VOID);
+BOOLEAN GuIoConsoleFailed(VOID);

@@ -41,6 +41,11 @@ static UINT32 InitialConfig[64];
 static const char *Stage;
 static GU_BOARD Board;
 
+/* Whether the card that is unlocked is the one that draws the console. On
+ * such a machine the transaction takes the screen down with it for a few
+ * seconds, and the user has to confirm that before it starts. */
+static BOOLEAN ConsoleOnTarget = FALSE;
+
 static EFI_STATUS Step(EFI_STATUS Status) {
   GuLog("CHECK stage=%s status=%#llx\n", Stage, (unsigned long long)Status);
   return !GuLogReady() && !EFI_ERROR(Status) ? EFI_DEVICE_ERROR : Status;
@@ -56,10 +61,15 @@ static EFI_STATUS Step(EFI_STATUS Status) {
  *
  * What matters for safety here is weaker and checkable at run time: the card
  * must not be the console's own display device. If the unlocked card drives
- * the console, the transaction's FLR would take the console down with it, and
- * the user would have no way to read the result. When a second display
- * adapter is present, the console is on the other one and the transaction is
- * safe to run.
+ * the console, the transaction's FLR would take the console down with it.
+ *
+ * That is not a refusal here, but a warning. A machine with a single display
+ * adapter has no other place to draw the screen, and refusing would mean the
+ * tool never works on it. The result of the attempt does not depend on the
+ * console: it is written to the report file on the EFI system partition. The
+ * console is therefore only asked to confirm that the user knows the screen
+ * goes black for a few seconds, and the transaction is started only after
+ * that confirmation.
  */
 static BOOLEAN DisplayCheck(VOID) {
   EFI_HANDLE *handles = NULL;
@@ -146,12 +156,15 @@ static BOOLEAN DisplayCheck(VOID) {
 
   GuFree(handles);
 
-  /* Refuse to take the console down with the card. */
-  if (console_on_target) {
-    GuLogText("REFUSED: the unlocked card is the console display. "
-              "Connect the display to another adapter or use a machine with an "
-              "integrated GPU.\n");
-    return FALSE;
+  /* The card that draws the console. */
+  if (console_on_target && !ConsoleOnTarget) {
+    ConsoleOnTarget = TRUE;
+    GuLog("display: the unlocked card is the console display\n");
+    GuLogText("NOTICE: the card that is unlocked is the one that draws the screen.\n"
+              "There is no other display adapter on this machine. The screen goes\n"
+              "black for a few seconds while the card resets, and it comes back when\n"
+              "Windows starts. The result of the attempt is written to the report\n"
+              "file on the EFI system partition.\n");
   }
 
   GuLog("GOP result: valid=%u console_on_target=%u\n", (unsigned)valid,
@@ -410,9 +423,10 @@ static EFI_STATUS PromCheck(VOID) {
  * Arming.
  *
  * The transaction rewrites GPU state, so it runs only after every check has
- * passed and only once. Pressing U confirms the intent; Esc cancels. The
- * cancellation window is generous because the screen may be blank while the
- * transaction runs.
+ * passed and only once. Pressing U confirms the intent, and pressing C does
+ * so on a machine where the unlocked card draws the console. Esc cancels.
+ * The cancellation window is generous because the screen may be blank while
+ * the transaction runs.
  */
 static EFI_STATUS Arm(VOID) {
   if (!Gu.profile_verified || Gu.fault || !Gu.display_ok)
@@ -427,8 +441,16 @@ static EFI_STATUS Arm(VOID) {
   GuLog("ARMING: %s at %zu:%zu:%zu.%zu, chip=%#x.\n",
         GuBoardDeviceName(Board.device_id), (size_t)Board.segment, (size_t)Board.bus,
         (size_t)Board.device, (size_t)Board.function, (unsigned)Board.chip);
-  GuLogText("Press U to perform the unlock now. Esc cancels.\n"
-            "The screen may stay black for a few seconds while the card resets.\n");
+  if (ConsoleOnTarget) {
+    /* A different key on such a machine, so that the confirmation cannot be
+     * given by habit. */
+    GuLogText("Press C to perform the unlock now. Esc cancels.\n"
+              "The screen goes black for a few seconds while the card resets, and it\n"
+              "comes back when Windows starts.\n");
+  } else {
+    GuLogText("Press U to perform the unlock now. Esc cancels.\n"
+              "The screen may stay black for a few seconds while the card resets.\n");
+  }
   if (!GuLogReady())
     return EFI_DEVICE_ERROR;
 
@@ -438,8 +460,13 @@ static EFI_STATUS Arm(VOID) {
     if (!EFI_ERROR(status)) {
       if (key.ScanCode == 0x17 || key.UnicodeChar == 27)
         return EFI_ABORTED;
-      if (key.UnicodeChar == 'u' || key.UnicodeChar == 'U')
-        return Gu.profile_verified && !Gu.fault ? EFI_SUCCESS : EFI_ACCESS_DENIED;
+      if (ConsoleOnTarget) {
+        if (key.UnicodeChar == 'c' || key.UnicodeChar == 'C')
+          return Gu.profile_verified && !Gu.fault ? EFI_SUCCESS : EFI_ACCESS_DENIED;
+      } else {
+        if (key.UnicodeChar == 'u' || key.UnicodeChar == 'U')
+          return Gu.profile_verified && !Gu.fault ? EFI_SUCCESS : EFI_ACCESS_DENIED;
+      }
     } else if (status != EFI_NOT_READY) {
       return status;
     }
@@ -733,6 +760,12 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE Image, EFI_SYSTEM_TABLE *St) {
     goto finish;
   }
 
+  /* The card that draws the console is reset by the transaction below. A
+   * write to it after that can hang, so the console is left alone from here
+   * on when it is that card. The report file keeps the record. */
+  if (ConsoleOnTarget)
+    GuIoSilenceConsole();
+
   Stage = "transaction";
   Gu.armed = TRUE;
   attempted = TRUE;
@@ -765,11 +798,13 @@ finish:
   if (attempted && !GuSafeToReturn())
     Halt();
   Gu.armed = FALSE;
-  if (GuLogReady())
+  if (GuLogReady()) {
+    if (GuIoConsoleFailed())
+      GuLog("the console stopped working during the run; the report file is the record\n");
     GuLog("FINAL status=%#llx stage=%s attempted=%u clean=%u\n",
           (unsigned long long)status, Stage, (unsigned)attempted,
           (unsigned)GuSafeToReturn());
-  else
+  } else
     GuConsole("Preflight or logging failed; no new attempt will start.\n");
 
   if (!GuLogReady()) {

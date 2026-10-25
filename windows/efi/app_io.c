@@ -25,6 +25,8 @@ static EFI_GUID LoadedGuid = EFI_LOADED_IMAGE_PROTOCOL_GUID,
 static EFI_SYSTEM_TABLE *Table;
 static EFI_FILE_PROTOCOL *Root, *Parent, *Run, *Report;
 static BOOLEAN LogFault;
+static BOOLEAN ConsoleFault;
+static BOOLEAN ConsoleOff;
 
 typedef struct {
   const char *name;
@@ -54,9 +56,19 @@ static VOID LogError(VOID) {
     Gu.fault = TRUE;
 }
 
+static VOID ConsoleError(VOID) {
+  /* The console is not the record of what happened: the report file is. A
+   * console that stops working, which is what happens when the card that
+   * draws it is reset, must not be taken for a fault of the transaction, or
+   * the machine would be left hanging instead of starting Windows. */
+  ConsoleFault = TRUE;
+}
+
 VOID GuConsole(const char *Text) {
+  if (ConsoleOff)
+    return;
   if (!Table || !Table->ConOut || !Table->ConOut->OutputString) {
-    LogError();
+    ConsoleError();
     return;
   }
   while (*Text) {
@@ -69,22 +81,38 @@ VOID GuConsole(const char *Text) {
     }
     line[n] = 0;
     if (EFI_ERROR(Table->ConOut->OutputString(Table->ConOut, line))) {
-      LogError();
+      ConsoleError();
       return;
     }
   }
 }
 
+VOID GuIoSilenceConsole(VOID) {
+  /* The card that draws the console is about to be reset by the transaction.
+   * A write to it after that can hang, so the console is left alone from here
+   * on. The report file keeps the record. */
+  ConsoleOff = TRUE;
+}
+
+BOOLEAN GuIoConsoleFailed(VOID) { return ConsoleFault; }
+
 VOID GuLogText(const char *Text) {
-  GuConsole(Text);
+  /* The report file is the record, so it is written first. The console is
+   * best effort: it may well be the card that is about to be reset. */
   if (!Report || LogFault) {
+    /* Without the report file the console is the only place left for this
+     * message. */
+    GuConsole(Text);
     LogError();
     return;
   }
   UINTN expected = strlen(Text), written = expected;
   EFI_STATUS status = Report->Write(Report, &written, (VOID *)Text);
-  if (EFI_ERROR(status) || written != expected || EFI_ERROR(Report->Flush(Report)))
+  if (EFI_ERROR(status) || written != expected || EFI_ERROR(Report->Flush(Report))) {
     LogError();
+    return;
+  }
+  GuConsole(Text);
 }
 
 VOID GuLog(const char *Format, ...) {

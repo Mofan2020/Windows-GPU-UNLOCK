@@ -177,12 +177,14 @@ WHAT YOU NEED TO DO FIRST
 
 WHAT TO EXPECT AT BOOT
   * The screen may go black for a few seconds while the card resets. This is
-    normal.
+    normal, and the screen comes back when Windows starts.
   * The unlock application asks you to press U to proceed. Press Esc to
     cancel and boot Windows unchanged.
-  * If the card drives the display, the firmware console has nowhere to
-    draw, so the tool refuses to run. Use a machine with an integrated GPU
-    and keep the display plugged into it.
+  * If your machine has only one display adapter, then the card that is
+    unlocked is the one that draws the screen. The application says so and
+    asks you to press C instead, because the screen will go black for a few
+    seconds and there is no other one to look at. The result of the attempt
+    is written to the report file on the EFI system partition either way.
 
 RISKS, HONESTLY
   * This is experimental. It modifies low-level firmware state. The upstream
@@ -235,6 +237,20 @@ function Show-HardwareReport {
         Write-Host ("  This tool applies to: {0}" -f $target.Target.Adapter) -ForegroundColor Green
     } else {
         Write-Host ("  This tool does not apply: {0}" -f $target.Reason) -ForegroundColor Red
+    }
+
+    # A machine with only one display adapter has nowhere else to draw the
+    # screen. The card that is unlocked is then the one that draws it, and
+    # the screen goes black for a few seconds while the card resets.
+    $physical = @($target.Adapters | Where-Object { $_.IsPhysical })
+    $others = @($physical | Where-Object {
+            $null -eq $target.Target -or $null -eq $_.DeviceId -or $_.DeviceId -ne $target.Target.DeviceId
+        })
+    if ($target.Supported -and $others.Count -eq 0) {
+        Write-Host ''
+        Write-Host '  This machine has one display adapter and no integrated GPU. The screen' -ForegroundColor Yellow
+        Write-Host '  goes black for a few seconds while the card resets, and it comes back' -ForegroundColor Yellow
+        Write-Host '  when Windows starts. The application asks you to confirm that at boot.' -ForegroundColor Yellow
     }
 }
 
