@@ -289,7 +289,6 @@ Remove-EspDriveLetter -Esp $esp -Letter $letter
 Assert-Equal '' $script:FakeEspLetter 'The assigned drive letter is removed again'
 
 Write-Host 'The zstd helper'
-
 # The firmware download is written into the standard input of the helper. The
 # parameter that carries the stream must not be called $input, because that
 # name belongs to the automatic variable of PowerShell and it cannot be bound
@@ -306,6 +305,23 @@ $streamParameter = (Get-Command Invoke-ZstdHelper).Parameters['InputStream']
 Assert-True ($null -ne $streamParameter) 'The stream parameter exists'
 Assert-Equal 'System.IO.Stream' $streamParameter.ParameterType.FullName 'The stream parameter is a stream'
 Assert-True (-not $parameters.Contains('Input')) 'The stream parameter is not called Input'
+
+Write-Host 'The entry point of the installer'
+
+# The packaged installer calls this script with these switches, so they have
+# to exist. Without the log the user is left with a window that closed
+# again, and without the check only mode the automatic test would change
+# the boot configuration of the machine it runs on.
+$entry = Get-Command (Join-Path $root 'windows/installer/Invoke-Installer.ps1')
+$entryParameters = $entry.Parameters.Keys
+foreach ($name in @('Yes', 'CheckOnly', 'LogPath', 'Uninstall', 'PayloadDirectory', 'AssetDirectory')) {
+    Assert-True ($entryParameters -contains $name) "the entry point takes a $name"
+}
+
+$source = Get-Content (Join-Path $root 'windows/installer/Invoke-Installer.ps1') -Raw
+Assert-Contains $source 'WGPU-RESULT' 'the entry point writes a result marker'
+Assert-Contains $source 'Start-Transcript' 'the entry point writes a log file'
+Assert-Contains $source 'Stop-Transcript' 'the entry point closes the log file'
 
 Write-Host ''
 if ($script:Failures -eq 0) {

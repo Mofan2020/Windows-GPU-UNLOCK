@@ -12,29 +12,80 @@
     The order of the screens matters. The notes come first, before anything
     is checked, so the user knows what they are agreeing to before the
     installer looks at the machine.
+
+    Everything that is printed is also written into a log file, because the
+    window that shows it can be hidden behind another one, and because a
+    message that is gone with the window is of no use to anybody. The last
+    line of the log is a marker that says how the installation ended, so the
+    caller can tell a refusal from a failure.
+
+.PARAMETER Yes
+    Do not wait for a key press. The packaged installer sets this, because
+    its own window is the one the user is looking at.
+
+.PARAMETER Silent
+    Print nothing but the result marker. Used by the automatic test.
+
+.PARAMETER LogPath
+    Where the log file goes. Defaults to a file in the temporary directory.
+
+.PARAMETER CheckOnly
+    Only report what the machine looks like, and change nothing. Used by the
+    automatic test, so that a test run cannot touch the boot configuration
+    of the machine it runs on.
 #>
 
 [CmdletBinding()]
 param(
     [switch]$Uninstall,
     [switch]$Yes,
+    [switch]$Silent,
+    [switch]$CheckOnly,
     [string]$PayloadDirectory,
-    [string]$AssetDirectory
+    [string]$AssetDirectory,
+    [string]$LogPath
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-. (Join-Path $PSScriptRoot 'Installer-Common.ps1')
-. (Join-Path $PSScriptRoot 'Detect-Hardware.ps1')
-. (Join-Path $PSScriptRoot 'Test-Preconditions.ps1')
-. (Join-Path $PSScriptRoot 'Get-FirmwareAssets.ps1')
+if (-not $LogPath) {
+    $LogPath = Join-Path $env:TEMP 'WindowsGPUUnlock-install.log'
+}
+
+# The log is written first, so that a failure while loading the other
+# scripts is in there as well.
+$transcript = $null
+try {
+    $logDirectory = Split-Path -Parent $LogPath
+    if ($logDirectory -and -not (Test-Path -LiteralPath $logDirectory)) {
+        New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
+    }
+    Start-Transcript -Path $LogPath -Force | Out-Null
+    $transcript = $true
+} catch {
+    Write-Host "The log file could not be opened: $($_.Exception.Message)"
+}
 
 function Write-Heading {
     param([string]$Text)
     Write-Host ''
     Write-Host $Text -ForegroundColor White
     Write-Host ('-' * $Text.Length) -ForegroundColor DarkGray
+}
+
+function Write-Result {
+    <#
+    .SYNOPSIS
+        Writes the marker that says how the installation ended.
+    #>
+    param([string]$Outcome, [string]$Detail)
+
+    if ($Detail) {
+        Write-Host "WGPU-RESULT: $Outcome - $Detail"
+    } else {
+        Write-Host "WGPU-RESULT: $Outcome"
+    }
 }
 
 function Show-Notes {
@@ -155,7 +206,7 @@ function Show-PreconditionReport {
     if ($null -ne $preconditions.Esp) {
         Write-Host ("  EFI partition    : {0} ({1:N0} MB)" -f $preconditions.Esp.Path, ($preconditions.Esp.SizeBytes / 1MB)) -ForegroundColor $color
     } else {
-        Write-Host ("  EFI partition    : not found") -ForegroundColor $color
+        Write-Host ('  EFI partition    : not found') -ForegroundColor $color
     }
 
     $color = if ($preconditions.FastStartup) { 'Yellow' } else { 'Green' }
@@ -182,66 +233,128 @@ function Show-PreconditionReport {
 }
 
 # ---------------------------------------------------------------------------
+# The scripts are loaded here, and not at the top of the file, so that a
+# failure while loading one of them is caught and written into the log
+# instead of ending the process without a word.
 
-Write-Host ''
-Write-Host 'Windows GPU UNLOCK' -ForegroundColor White
-Write-Host 'Installer for the generic (all GA10x) build.' -ForegroundColor DarkGray
-
-Show-Notes
-
-if ($Uninstall) {
-    Write-Heading 'Uninstalling'
-    & (Join-Path $PSScriptRoot 'Install-GpuUnlock.ps1') -Action Uninstall
-    Write-Host ''
-    Write-Host 'Done.' -ForegroundColor Green
-    exit 0
-}
-
-Show-HardwareReport
-
-$preconditions = Show-PreconditionReport
-
-if (-not $preconditions.CanInstall) {
-    Write-Host ''
-    Write-Host 'Nothing was changed.' -ForegroundColor Red
-    exit 1
-}
-
-Write-Host ''
-Write-Host 'Press Enter to install, or Ctrl+C to stop.' -ForegroundColor White
-if (-not $Yes) {
-    [void](Read-Host)
-}
-
-# The firmware assets are produced here, on this machine, from pinned
-# upstream inputs. They are never downloaded as a ready-made blob, because
-# NVIDIA's licence does not permit that.
-$workRoot = Join-Path $env:TEMP 'WindowsGPUUnlock-assets'
-$assetRoot = Join-Path $workRoot 'assets'
-
-Write-Heading 'Preparing the firmware assets'
-Write-Host '  This downloads about 100 MB from NVIDIA and the CachyOS archive and' -ForegroundColor Gray
-Write-Host '  generates the firmware files locally. It can take a few minutes.' -ForegroundColor Gray
-Write-Host ''
+$exitCode = 0
+$result = 'failed'
+$detail = ''
 
 try {
-    $assets = @(Get-FirmwareAssets -OutputDirectory $assetRoot -WorkingDirectory $workRoot)
-} catch {
+    . (Join-Path $PSScriptRoot 'Installer-Common.ps1')
+    . (Join-Path $PSScriptRoot 'Detect-Hardware.ps1')
+    . (Join-Path $PSScriptRoot 'Test-Preconditions.ps1')
+    . (Join-Path $PSScriptRoot 'Get-FirmwareAssets.ps1')
+
     Write-Host ''
-    Write-Host "  The firmware assets could not be prepared: $($_.Exception.Message)" -ForegroundColor Red
-    Write-Host '  Nothing was changed on this machine.' -ForegroundColor Red
-    exit 1
+    Write-Host 'Windows GPU UNLOCK' -ForegroundColor White
+    Write-Host 'Installer for the generic (all GA10x) build.' -ForegroundColor DarkGray
+    Write-Host "Log file: $LogPath" -ForegroundColor DarkGray
+
+    if (-not $Silent) {
+        Show-Notes
+    }
+
+    if ($Uninstall) {
+        Write-Heading 'Uninstalling'
+        & (Join-Path $PSScriptRoot 'Install-GpuUnlock.ps1') -Action Uninstall
+        Write-Host ''
+        Write-Host 'Done.' -ForegroundColor Green
+        $result = 'ok'
+        $exitCode = 0
+    } else {
+        Show-HardwareReport
+
+        $preconditions = Show-PreconditionReport
+
+        $target = Test-UnlockTarget
+        if (-not $target.Supported) {
+            Write-Host ''
+            Write-Host ("  This tool does not apply to this machine: {0}" -f $target.Reason) -ForegroundColor Red
+        }
+
+        if ($CheckOnly) {
+            # Nothing is downloaded and nothing is changed. The report above
+            # is the whole answer.
+            if ($target.Supported -and $preconditions.CanInstall) {
+                $result = 'ok'
+                $detail = 'the machine is ready'
+                $exitCode = 0
+            } else {
+                $result = 'blocked'
+                $detail = 'the machine is not ready'
+                $exitCode = 1
+            }
+        } elseif (-not $preconditions.CanInstall) {
+            Write-Host ''
+            Write-Host 'Nothing was changed.' -ForegroundColor Red
+            $result = 'blocked'
+            $detail = 'the machine is not ready for the transaction'
+            $exitCode = 1
+        } else {
+            Write-Host ''
+            Write-Host 'Press Enter to install, or Ctrl+C to stop.' -ForegroundColor White
+            if (-not $Yes) {
+                [void](Read-Host)
+            }
+
+            # The firmware assets are produced here, on this machine, from
+            # pinned upstream inputs. They are never downloaded as a
+            # ready-made blob, because NVIDIA's licence does not permit that.
+            $workRoot = Join-Path $env:TEMP 'WindowsGPUUnlock-assets'
+            $assetRoot = Join-Path $workRoot 'assets'
+
+            Write-Heading 'Preparing the firmware assets'
+            Write-Host '  This downloads about 100 MB from NVIDIA and the CachyOS archive and' -ForegroundColor Gray
+            Write-Host '  generates the firmware files locally. It can take a few minutes.' -ForegroundColor Gray
+            Write-Host ''
+
+            try {
+                $assets = @(Get-FirmwareAssets -OutputDirectory $assetRoot -WorkingDirectory $workRoot)
+            } catch {
+                Write-Host ''
+                Write-Host "  The firmware assets could not be prepared: $($_.Exception.Message)" -ForegroundColor Red
+                Write-Host '  Nothing was changed on this machine.' -ForegroundColor Red
+                $result = 'failed'
+                $detail = $_.Exception.Message
+                $exitCode = 1
+                $assets = @()
+            }
+
+            if ($exitCode -eq 0) {
+                $payload = $PayloadDirectory
+                if (-not $payload) {
+                    $payload = Join-Path $PSScriptRoot 'payload'
+                }
+
+                & (Join-Path $PSScriptRoot 'Install-GpuUnlock.ps1') `
+                    -Action Install `
+                    -PayloadDirectory $payload `
+                    -AssetDirectory $assetRoot
+
+                Write-Host ''
+                Write-Host 'Done. Reboot to try it.' -ForegroundColor Green
+                $result = 'ok'
+                $exitCode = 0
+            }
+        }
+    }
+} catch {
+    # Nothing above this point is allowed to end the process without saying
+    # what went wrong.
+    $detail = $_.Exception.Message
+    Write-Host ''
+    Write-Host "The installation stopped: $detail" -ForegroundColor Red
+    Write-Host "The log file is here: $LogPath" -ForegroundColor Red
+    $result = 'failed'
+    $exitCode = 1
 }
 
-$payload = $PayloadDirectory
-if (-not $payload) {
-    $payload = Join-Path $PSScriptRoot 'payload'
+Write-Result $result $detail
+
+if ($transcript) {
+    try { Stop-Transcript | Out-Null } catch { }
 }
 
-& (Join-Path $PSScriptRoot 'Install-GpuUnlock.ps1') `
-    -Action Install `
-    -PayloadDirectory $payload `
-    -AssetDirectory $assetRoot
-
-Write-Host ''
-Write-Host 'Done. Reboot to try it.' -ForegroundColor Green
+exit $exitCode

@@ -288,3 +288,72 @@ jobs:
         with:
           name: installer
           path: windows/installer/*.exe
+
+  smoke:
+    name: installer smoke test
+    runs-on: windows-2022
+    needs: [installer]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: installer
+          path: build/installer
+
+      # The packaged installer is run for real, so that the whole chain from
+      # the window down to the scripts is covered. The runner has no card
+      # that this tool applies to, so the installer is expected to refuse,
+      # but it has to refuse with a readable reason and not silently.
+      - name: Run the installer
+        shell: pwsh
+        env:
+          WGPU_CHECK_ONLY: '1'
+        run: |
+          $exe = (Get-ChildItem build/installer/*.exe | Select-Object -First 1).FullName
+          $target = "$env:RUNNER_TEMP\wgpu"
+          Write-Host "running $exe into $target"
+
+          $process = Start-Process -FilePath $exe -ArgumentList "/S /D=$target" -Wait -PassThru
+          Write-Host "exit code: $($process.ExitCode)"
+
+          $log = Join-Path $target 'install.log'
+          if (-not (Test-Path $log)) {
+            Write-Host '--- what was installed ---'
+            Get-ChildItem $target -Recurse -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_.FullName }
+            throw 'the installer wrote no log file'
+          }
+          Write-Host '--- the log ---'
+          Get-Content $log
+          Write-Host '--- end of the log ---'
+
+          Set-Content -Path "$env:RUNNER_TEMP\wgpu-exit.txt" -Value $process.ExitCode
+
+      - name: Check the result
+        shell: pwsh
+        run: |
+          $target = "$env:RUNNER_TEMP\wgpu"
+          $text = Get-Content (Join-Path $target 'install.log') -Raw
+          $exitCode = [int](Get-Content "$env:RUNNER_TEMP\wgpu-exit.txt")
+
+          foreach ($needle in @('Windows GPU UNLOCK', 'System checks', 'Secure Boot', 'WGPU-RESULT:')) {
+            if ($text -notlike "*$needle*") { throw "the log does not mention: $needle" }
+          }
+
+          if ($text -match 'WGPU-RESULT: ok') {
+            if ($exitCode -ne 0) { throw "the installer said ok but returned $exitCode" }
+          } else {
+            if ($exitCode -eq 0) { throw 'the installer refused but returned 0' }
+          }
+          Write-Host "OK   the installer ran and reported (exit code $exitCode)"
+
+      # The uninstaller is part of the same package, so it is run as well.
+      - name: Run the uninstaller
+        shell: pwsh
+        run: |
+          $uninstaller = "$env:RUNNER_TEMP\wgpu\Uninstall.exe"
+          if (-not (Test-Path $uninstaller)) { throw 'the uninstaller was not installed' }
+          $process = Start-Process -FilePath $uninstaller -ArgumentList "/S" -Wait -PassThru
+          Write-Host "exit code: $($process.ExitCode)"
+          if ($process.ExitCode -ne 0) { throw "the uninstaller returned $($process.ExitCode)" }
+          Write-Host 'OK   the uninstaller ran'
