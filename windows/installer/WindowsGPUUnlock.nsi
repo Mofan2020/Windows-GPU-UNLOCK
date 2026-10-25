@@ -151,7 +151,7 @@ Section "Install"
   StrCpy $0 "$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe"
   IfFileExists $0 powershell_found
 
-  MessageBox MB_ICONSTOP "Windows PowerShell was not found on this machine, so the installer cannot run.`r`n`r`nThe log file is here: $INSTDIR\${LOGFILE}"
+  MessageBox MB_ICONSTOP "Windows PowerShell was not found on this machine, so the installer cannot run.`r`n`r`nThe log file is here: $INSTDIR\${LOGFILE}" /SD IDOK
   Abort
 
   powershell_found:
@@ -177,15 +177,19 @@ Section "Install"
   WriteRegStr HKLM "Software\WindowsGPUUnlock" "Staged" "1"
 
   ; Show the log, because the window that carried the output may have been
-  ; hidden, and because the user needs to know what happened.
-  ExecShell "open" "$INSTDIR\${LOGFILE}"
+  ; hidden, and because the user needs to know what happened. A silent run
+  ; has nobody to show it to, and the shell can take a long time to answer,
+  ; so it is left alone there.
+  IfSilent no_log_window
+    ExecShell "open" "$INSTDIR\${LOGFILE}"
+  no_log_window:
 
   ${If} $1 != 0
-    MessageBox MB_ICONSTOP "The installation did not finish. The log has been opened for you, and it is here: $INSTDIR\${LOGFILE}`r`n`r`nNothing was written to the EFI system partition, and nothing was changed in the boot configuration."
+    MessageBox MB_ICONSTOP "The installation did not finish. The log has been opened for you, and it is here: $INSTDIR\${LOGFILE}`r`n`r`nIf the log says that the EFI system partition was already written to, run the uninstaller afterwards to clean it up." /SD IDOK
     Abort
   ${EndIf}
 
-  MessageBox MB_OK "Done. Reboot to try it.`r`n`r`nThe log has been opened for you, and it is here: $INSTDIR\${LOGFILE}"
+  MessageBox MB_OK "Done. Reboot to try it.`r`n`r`nThe log has been opened for you, and it is here: $INSTDIR\${LOGFILE}" /SD IDOK
 SectionEnd
 
 Section "Uninstall"
@@ -198,7 +202,7 @@ Section "Uninstall"
   StrCpy $0 "$WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
   IfFileExists $0 uninstaller_found
 
-  MessageBox MB_ICONSTOP "Windows PowerShell was not found on this machine, so the uninstaller cannot run. The boot entry and the files on the EFI system partition are still there."
+  MessageBox MB_ICONSTOP "Windows PowerShell was not found on this machine, so the uninstaller cannot run. The boot entry and the files on the EFI system partition are still there." /SD IDOK
   Abort
 
   uninstaller_found:
