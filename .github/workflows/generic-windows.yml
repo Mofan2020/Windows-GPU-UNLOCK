@@ -314,10 +314,22 @@ jobs:
           $target = "$env:RUNNER_TEMP\wgpu"
           Write-Host "running $exe into $target"
 
-          $process = Start-Process -FilePath $exe -ArgumentList "/S /D=$target" -Wait -PassThru
+          $log = Join-Path $target 'install.log'
+          $process = Start-Process -FilePath $exe -ArgumentList "/S /D=$target" -PassThru
+          if (-not $process.WaitForExit(240000)) {
+            Write-Host 'the installer did not finish in four minutes'
+            try { $process.Kill() } catch { }
+            if (Test-Path $log) {
+              Write-Host '--- the log so far ---'
+              Get-Content $log
+              Write-Host '--- end of the log ---'
+            } else {
+              Write-Host 'the installer wrote no log file'
+            }
+            throw 'the installer hung'
+          }
           Write-Host "exit code: $($process.ExitCode)"
 
-          $log = Join-Path $target 'install.log'
           if (-not (Test-Path $log)) {
             Write-Host '--- what was installed ---'
             Get-ChildItem $target -Recurse -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_.FullName }

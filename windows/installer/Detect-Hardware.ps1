@@ -94,9 +94,12 @@ function Get-DisplayAdapter {
 
     # WMI gives the human-facing picture. The PNP device ID carries the PCI
     # vendor and device IDs, which is what decides whether the unlock applies.
+    # The query is given a time limit, because the WMI service on a busy
+    # machine can take a very long time to answer, and an installer that
+    # hangs is worse than one that says it could not find out.
     $videos = @()
     try {
-        $videos = @(Get-CimInstance -ClassName Win32_VideoController -ErrorAction Stop)
+        $videos = @(Get-CimInstance -ClassName Win32_VideoController -OperationTimeoutSec 20 -ErrorAction Stop)
     } catch {
         Write-Verbose "Win32_VideoController is unavailable: $($_.Exception.Message)"
     }

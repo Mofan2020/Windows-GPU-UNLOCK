@@ -258,6 +258,10 @@ function Test-InstallPreconditions {
     $blocking = @()
     $warnings = @()
 
+    # Each check is announced, so that the log says where the installer was
+    # when it stopped. Some of these commands talk to a service that does
+    # not always answer.
+    Write-Host '  ... checking the Secure Boot state'
     $secureBoot = Get-SecureBootState
     if ($secureBoot.Enabled -eq $true) {
         $blocking += 'Secure Boot is enabled. This tool installs an unsigned EFI application, so the firmware will refuse to load it. Turn Secure Boot off in the BIOS and reboot before installing.'
@@ -265,11 +269,13 @@ function Test-InstallPreconditions {
         $warnings += 'The Secure Boot state could not be determined. If Secure Boot is on, the installed application will not run.'
     }
 
+    Write-Host '  ... checking the BitLocker state'
     $bitLocker = Get-BitLockerState
     if ($bitLocker.Protected) {
         $blocking += 'BitLocker is protecting the Windows volume. The transaction resets the graphics card, which can send a locked machine into recovery. Suspend BitLocker protection before installing.'
     }
 
+    Write-Host '  ... looking for the EFI system partition'
     $esp = Get-EfiSystemPartition
     if ($null -eq $esp) {
         $blocking += 'No FAT32 EFI system partition was found. The unlock application must be staged on one, because the firmware can only read FAT32 volumes during boot.'

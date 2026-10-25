@@ -185,6 +185,7 @@ WHAT IS NOT INCLUDED
 function Show-HardwareReport {
     Write-Heading 'Your display hardware'
 
+    Write-Host '  ... looking for the display adapters'
     $adapters = @(Get-DisplayAdapter)
     if ($adapters.Count -eq 0) {
         Write-Host '  No display adapter was reported by Windows.' -ForegroundColor Red
