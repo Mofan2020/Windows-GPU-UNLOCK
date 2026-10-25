@@ -253,16 +253,20 @@ jobs:
           if (-not $makensis) { throw 'makensis.exe was not found' }
 
           # A tag of the form v1.2.3 names the package; anything else is a
-          # development build.
+          # development build. The product version in the resources has to be
+          # a plain number, so it is built apart from the name.
           $version = '1.0.0-dev'
+          $productVersion = '1.0.0.0'
           if ($env:GITHUB_REF -like 'refs/tags/v*') {
             $version = $env:GITHUB_REF_NAME -replace '^v', ''
+            $productVersion = "$version.0"
           }
           Write-Host "Building the installer for version $version"
 
           Push-Location windows/installer
           try {
-            & $makensis "-DVERSION=$version" "-DPAYLOAD=..\..\build" "-DHELPER=..\..\build\helper" WindowsGPUUnlock.nsi
+            & $makensis "-DVERSION=$version" "-DPRODUCT_VERSION=$productVersion" `
+              "-DPAYLOAD=..\..\build" "-DHELPER=..\..\build\helper" WindowsGPUUnlock.nsi
             if ($LASTEXITCODE -ne 0) { throw 'The installer packaging failed' }
           } finally {
             Pop-Location

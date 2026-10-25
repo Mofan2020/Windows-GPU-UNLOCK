@@ -13,6 +13,13 @@
   !define VERSION "1.0.0"
 !endif
 
+; The product version in the resources has to be a plain number of four
+; parts. A version with a suffix, like 1.0.0-dev, is only used for the
+; name that the user sees.
+!ifndef PRODUCT_VERSION
+  !define PRODUCT_VERSION "${VERSION}.0"
+!endif
+
 !ifndef PAYLOAD
   !define PAYLOAD "..\..\build\payload"
 !endif
@@ -35,13 +42,13 @@ ShowInstDetails show
 ShowUninstDetails show
 SetCompressor /SOLID lzma
 
-VIProductVersion "${VERSION}.0"
+VIProductVersion "${PRODUCT_VERSION}"
 VIAddVersionKey "ProductName" "${PRODUCT}"
 VIAddVersionKey "CompanyName" "${PUBLISHER}"
 VIAddVersionKey "FileDescription" "${PRODUCT} installer"
-VIAddVersionKey "FileVersion" "${VERSION}"
+VIAddVersionKey "FileVersion" "${PRODUCT_VERSION}"
 VIAddVersionKey "LegalCopyright" "GPL-2.0-only"
-VIAddVersionKey "ProductVersion" "${VERSION}"
+VIAddVersionKey "ProductVersion" "${PRODUCT_VERSION}"
 
 !include "MUI2.nsh"
 !include "FileFunc.nsh"
