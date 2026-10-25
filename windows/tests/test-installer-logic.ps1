@@ -288,6 +288,25 @@ Assert-Equal $letter $script:FakeEspLetter 'The assigned drive letter was applie
 Remove-EspDriveLetter -Esp $esp -Letter $letter
 Assert-Equal '' $script:FakeEspLetter 'The assigned drive letter is removed again'
 
+Write-Host 'The zstd helper'
+
+# The firmware download is written into the standard input of the helper. The
+# parameter that carries the stream must not be called $input, because that
+# name belongs to the automatic variable of PowerShell and it cannot be bound
+# to a stream.
+. (Join-Path $root 'windows/installer/Get-FirmwareAssets.ps1')
+Assert-True ($null -ne (Get-Command Invoke-ZstdHelper -ErrorAction SilentlyContinue)) 'The helper call is a function of its own'
+Assert-True ($null -ne (Get-Command Get-PackageMember -ErrorAction SilentlyContinue)) 'The package download is a function of its own'
+
+$parameters = (Get-Command Invoke-ZstdHelper).Parameters.Keys
+foreach ($name in @('HelperPath', 'Member', 'OutputPath', 'InputStream')) {
+    Assert-True ($parameters -contains $name) "The helper call takes a $name"
+}
+$streamParameter = (Get-Command Invoke-ZstdHelper).Parameters['InputStream']
+Assert-True ($null -ne $streamParameter) 'The stream parameter exists'
+Assert-Equal 'System.IO.Stream' $streamParameter.ParameterType.FullName 'The stream parameter is a stream'
+Assert-True (-not $parameters.Contains('Input')) 'The stream parameter is not called Input'
+
 Write-Host ''
 if ($script:Failures -eq 0) {
     Write-Host "all checks passed ($script:Checks)" -ForegroundColor Green

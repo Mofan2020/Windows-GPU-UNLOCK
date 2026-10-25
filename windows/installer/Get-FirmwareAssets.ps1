@@ -209,6 +209,76 @@ function Get-ZstdHelper {
     return $null
 }
 
+function Invoke-ZstdHelper {
+    <#
+    .SYNOPSIS
+        Writes a compressed stream into the zstdcat helper and takes one
+        member out of it.
+
+    .DESCRIPTION
+        The helper stops as soon as the wanted member has been written, and
+        then closes its standard input. The writer then gets a broken pipe,
+        which is the normal end of the transfer and not a failure. This is
+        what lets the caller abandon a download that still has megabytes to
+        go.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$HelperPath,
+        [Parameter(Mandatory)][string]$Member,
+        [Parameter(Mandatory)][string]$OutputPath,
+        [Parameter(Mandatory)][System.IO.Stream]$InputStream
+    )
+
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $HelperPath
+    $startInfo.Arguments = "--member `"$Member`" --output `"$OutputPath`""
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardInput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.CreateNoWindow = $true
+
+    $process = [System.Diagnostics.Process]::Start($startInfo)
+    if ($null -eq $process) {
+        throw "Could not start the helper $HelperPath"
+    }
+
+    $total = 0L
+    $failed = $null
+    try {
+        $buffer = New-Object byte[] (1MB)
+        while (($read = $InputStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            try {
+                $process.StandardInput.BaseStream.Write($buffer, 0, $read)
+            } catch [System.IO.IOException] {
+                # The helper closed its input, which means it is done.
+                break
+            }
+            $total += $read
+        }
+    } catch {
+        $failed = $_
+    } finally {
+        try { $process.StandardInput.Close() } catch { }
+    }
+
+    $diagnostics = $process.StandardError.ReadToEnd()
+    $process.WaitForExit()
+    $exitCode = $process.ExitCode
+    $process.Dispose()
+
+    if ($null -ne $failed) {
+        throw $failed
+    }
+    if ($exitCode -ne 0) {
+        throw "The helper could not extract $Member.`n$diagnostics"
+    }
+
+    return [pscustomobject]@{
+        BytesTransferred = $total
+        Diagnostics      = $diagnostics
+    }
+}
+
 function Get-PackageMember {
     <#
     .SYNOPSIS
@@ -239,23 +309,10 @@ function Get-PackageMember {
     }
 
     Write-Host "  Streaming $Url"
-    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
-    $startInfo.FileName = $HelperPath
-    $startInfo.Arguments = "--member `"$Member`" --output `"$OutputPath`""
-    $startInfo.UseShellExecute = $false
-    $startInfo.RedirectStandardInput = $true
-    $startInfo.RedirectStandardError = $true
-    $startInfo.CreateNoWindow = $true
-
-    $process = [System.Diagnostics.Process]::Start($startInfo)
-    if ($null -eq $process) {
-        throw "Could not start the helper $HelperPath"
-    }
-
     $client = New-HttpClient
     $response = $null
     $source = $null
-    $failed = $null
+    $result = $null
     try {
         $request = New-Object System.Net.Http.HttpRequestMessage([System.Net.Http.HttpMethod]::Get, $Url)
         $response = $client.SendAsync($request, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
@@ -264,39 +321,15 @@ function Get-PackageMember {
         }
         $source = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
 
-        $buffer = New-Object byte[] (1MB)
-        $total = 0L
-        while (($read = $source.Read($buffer, 0, $buffer.Length)) -gt 0) {
-            try {
-                $process.StandardInput.BaseStream.Write($buffer, 0, $read)
-            } catch [System.IO.IOException] {
-                # The helper closed its input, which means it is done.
-                break
-            }
-            $total += $read
-        }
-    } catch {
-        $failed = $_
+        $result = Invoke-ZstdHelper -HelperPath $HelperPath -Member $Member -OutputPath $OutputPath -InputStream $source
     } finally {
         if ($null -ne $source) { $source.Dispose() }
         if ($null -ne $response) { $response.Dispose() }
         $client.Dispose()
-        try { $process.StandardInput.Close() } catch { }
     }
 
-    $diagnostics = $process.StandardError.ReadToEnd()
-    $process.WaitForExit()
-    $exitCode = $process.ExitCode
-    $process.Dispose()
-
-    if ($null -ne $failed) {
-        throw $failed
-    }
-    if ($exitCode -ne 0) {
-        throw "The helper could not extract $Member from the package.`n$diagnostics"
-    }
-    Write-Host ("  Transferred {0:N1} MiB" -f ($total / 1MB))
-    Write-Host "  $diagnostics"
+    Write-Host ("  Transferred {0:N1} MiB" -f ($result.BytesTransferred / 1MB))
+    Write-Host "  $($result.Diagnostics)"
 }
 
 function Get-PackageMemberWithTar {

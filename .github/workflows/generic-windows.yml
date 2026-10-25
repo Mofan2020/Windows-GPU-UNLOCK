@@ -86,17 +86,27 @@ jobs:
         run: |
           mkdir -p build/fixture/test
           head -c 16384 /dev/urandom > build/fixture/test/member.bin
-          printf 'not wanted' > build/fixture/test/other.bin
+          # The ballast makes the archive much bigger than the member, so the
+          # stream can be cut short to prove that the helper stops at the
+          # member and does not need the rest of it.
+          head -c 4194304 /dev/urandom > build/fixture/test/ballast.bin
           tar -C build/fixture -cf build/fixture/fixture.tar test
           zstd -q -f -o build/fixture/fixture.tar.zst build/fixture/fixture.tar
           sha256sum build/fixture/test/member.bin | tee build/fixture/member.sha256
 
+      # Everything that the next job needs is staged in one directory, so
+      # that the artifact does not carry the tree of the repository with it.
+      - name: Stage the artifact
+        run: |
+          mkdir -p build/stage/fixture
+          cp windows/installer/zstd/build/zstdcat.exe build/stage/zstdcat.exe
+          cp build/fixture/fixture.tar.zst build/stage/fixture/fixture.tar.zst
+          cp build/fixture/member.sha256 build/stage/fixture/member.sha256
+
       - uses: actions/upload-artifact@v4
         with:
           name: zstd-helper
-          path: |
-            windows/installer/zstd/build/zstdcat.exe
-            build/fixture/
+          path: build/stage/
 
   tests:
     name: host tests
@@ -167,21 +177,57 @@ jobs:
       - name: Test the helper
         shell: pwsh
         run: |
+          # The same code that the installer uses, so that the test covers the
+          # real call path.
+          . windows/installer/Get-FirmwareAssets.ps1
+
           $expected = ((Get-Content build/helper/fixture/member.sha256) -split '\s+')[0].Trim()
           if (-not $expected) { throw 'The fixture digest is missing' }
 
           & build/helper/zstdcat.exe --version
           if ($LASTEXITCODE -ne 0) { throw 'The helper did not start' }
 
-          # The helper reads the compressed stream from its standard input.
-          cmd /c "build\helper\zstdcat.exe --member test/member.bin --output build\helper\member.bin < build\helper\fixture\fixture.tar.zst"
-          if ($LASTEXITCODE -ne 0) { throw 'The helper did not extract the member' }
+          $helper = (Resolve-Path 'build/helper/zstdcat.exe').Path
+          $stream = (Resolve-Path 'build/helper/fixture/fixture.tar.zst').Path
+
+          # The compressed stream goes into the standard input of the helper.
+          $inputStream = [System.IO.File]::OpenRead($stream)
+          try {
+            $result = Invoke-ZstdHelper -HelperPath $helper -Member 'test/member.bin' `
+              -OutputPath 'build/helper/member.bin' -InputStream $inputStream
+          } finally {
+            $inputStream.Dispose()
+          }
 
           $actual = (Get-FileHash build/helper/member.bin -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($actual -ne $expected) {
             throw "The extracted member does not match: expected $expected, got $actual"
           }
           Write-Host "OK   the helper extracted the member ($actual)"
+
+          # The stream is cut in half. The member sits at the front of the
+          # archive, so the helper has to be able to finish without reading
+          # the rest of it. This is what lets the installer abandon the
+          # download once the member is complete.
+          $bytes = [System.IO.File]::ReadAllBytes($stream)
+          $half = [int]($bytes.Length / 2)
+          $cut = New-Object byte[] $half
+          [Array]::Copy($bytes, $cut, $half)
+          [System.IO.File]::WriteAllBytes('build/helper/cut.tar.zst', $cut)
+
+          $inputStream = [System.IO.File]::OpenRead((Resolve-Path 'build/helper/cut.tar.zst').Path)
+          try {
+            $result = Invoke-ZstdHelper -HelperPath $helper -Member 'test/member.bin' `
+              -OutputPath 'build/helper/member-cut.bin' -InputStream $inputStream
+          } finally {
+            $inputStream.Dispose()
+          }
+
+          $actual = (Get-FileHash build/helper/member-cut.bin -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) {
+            throw "The member from the cut stream does not match: expected $expected, got $actual"
+          }
+          Write-Host "OK   the helper stopped at the member ($actual)"
 
       - name: Package the installer
         shell: pwsh
