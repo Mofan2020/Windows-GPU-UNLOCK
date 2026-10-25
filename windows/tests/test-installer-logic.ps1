@@ -76,6 +76,7 @@ function Get-CimInstance {
     param(
         [string]$ClassName,
         [string]$Namespace,
+        [int]$OperationTimeoutSec,
         [Parameter(ValueFromPipeline = $true)]$InputObject
     )
     if ($ClassName -eq 'Win32_VideoController') {
